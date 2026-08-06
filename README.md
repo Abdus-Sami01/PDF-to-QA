@@ -118,8 +118,13 @@ Anthropic image blocks, OpenAI `image_url` parts, or Ollama's `images` array.
 Backends: `ollama`, `vllm` and any OpenAI-compatible server, `openai`, `anthropic`, and `echo`
 (offline, deterministic — the whole pipeline runs with no API key).
 
-Parsing prefers PyMuPDF, falls back to pdfminer.six. The core has **zero required dependencies**;
-PDF parsing, Parquet, YAML config, and Z3 are all optional extras.
+Parsing prefers PyMuPDF and falls back to pdfminer.six. pdfminer can't rasterise, so figure
+rendering on that path goes through pypdfium2, with the PNG written directly — no imaging library
+needed. It also has no table detector, so on the pdfminer path tables come out as figure crops
+rather than queryable grids; install PyMuPDF if you want SQL over tables.
+
+The core has **zero required dependencies**; PDF parsing, rendering, Parquet, YAML config, and Z3
+are all optional extras.
 
 ## Exports
 
@@ -131,6 +136,40 @@ Rendered figure crops land in `<outdir>/assets/<pdf-stem>/` and the `multimodal`
 pdfqa run docs/ -f chatml dpo multimodal --limit 2000 --vision anthropic
 pdfqa run docs/ --no-figures        # skip rendering and multimodal synthesis entirely
 ```
+
+## Auditing what came out
+
+```bash
+pdfqa report dataset/
+```
+
+```
+records: 1842   mean quality: 0.79   p10/p50/p90: 0.62/0.81/0.93
+task: {'qa': 902, 'multihop': 341, 'multiturn': 210, 'react': 156, 'figure_qa': 143, 'cross_document': 90}
+
+gate pass rates:
+  nli_forward          1691/1842  (92%)
+  nli_reverse          1553/1842  (84%)
+  trace_execution       141/156   (90%)
+  z3                    398/402   (99%)
+```
+
+Gate pass rates are the useful signal: a low `nli_reverse` rate means the generator is writing
+questions answerable from general knowledge, and a low `trace_execution` rate means it is inventing
+tool observations. Both are prompt problems you can see and fix, rather than guess at.
+
+## Growing a corpus over time
+
+Re-running over a directory that gained new papers would otherwise re-emit the same questions for
+the documents that didn't change. Point a run at its previous output and near-duplicates are dropped
+before selection:
+
+```bash
+pdfqa run papers/ -o dataset/2026-02 --against dataset/2026-01
+```
+
+The reference side reads any export shape — `raw`, `chatml`, `sharegpt`, `alpaca`, `multimodal` —
+so it works against datasets you exported for a trainer rather than kept in native form.
 
 ## Incremental
 
@@ -150,6 +189,7 @@ pdfqa cache --clear --stage synth
 pdfqa run <inputs>       # full pipeline
 pdfqa inspect <file>     # AST outline, resolved references, rendered images, chunk plan
 pdfqa graph <file>       # knowledge graph stats and multi-hop seed pairs
+pdfqa report <dir>       # audit a produced dataset
 pdfqa cache              # cache state
 pdfqa init pdfqa.yaml    # starter config
 ```

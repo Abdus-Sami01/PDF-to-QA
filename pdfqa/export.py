@@ -156,6 +156,53 @@ def write_parquet(records: list[QARecord], path: str | Path) -> str | None:
     return str(path)
 
 
+def load_records(path: str | Path) -> list[QARecord]:
+    """Read back a `raw` export — the only format that round-trips every field."""
+    p = Path(path)
+    files = sorted(p.rglob("raw.jsonl")) if p.is_dir() else [p]
+    out: list[QARecord] = []
+    for f in files:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                out.append(QARecord.from_dict(json.loads(line)))
+    return out
+
+
+def audit(records: list[QARecord]) -> dict:
+    """Post-hoc view of a produced dataset: what passed, what was repaired, where it came from."""
+    gates: dict[str, dict[str, int]] = {}
+    stages: dict[str, int] = {}
+    per_source: dict[str, int] = {}
+    quality = sorted(r.scores.get("quality", 0.0) for r in records)
+
+    for rec in records:
+        for src in rec.prov.sources or [rec.prov.source]:
+            per_source[src] = per_source.get(src, 0) + 1
+        for entry in rec.prov.verification:
+            stage = entry.get("stage", "?")
+            stages[stage] = stages.get(stage, 0) + 1
+            if "passed" in entry:
+                bucket = gates.setdefault(stage, {"pass": 0, "fail": 0})
+                bucket["pass" if entry["passed"] else "fail"] += 1
+
+    def pct(q: float) -> float:
+        return round(quality[min(len(quality) - 1, int(q * len(quality)))], 4) if quality else 0.0
+
+    return {
+        "count": len(records),
+        "quality": {"p10": pct(0.10), "p50": pct(0.50), "p90": pct(0.90)} if quality else {},
+        "gates": dict(sorted(gates.items())),
+        "stages": dict(sorted(stages.items())),
+        "sources": dict(sorted(per_source.items(), key=lambda kv: -kv[1])),
+        "with_rejected": sum(1 for r in records if r.rejected),
+        "with_images": sum(1 for r in records if r.images),
+        "with_tool_trace": sum(1 for r in records if r.tool_trace),
+        "multi_turn": sum(1 for r in records if r.turns),
+        "repaired_traces": sum(1 for r in records if any(v.get("stage") == "trace_repair" for v in r.prov.verification)),
+        "mean_answer_chars": round(sum(len(r.answer) for r in records) / max(1, len(records)), 1),
+    }
+
+
 def write_dataset_card(records: list[QARecord], stats: dict, path: str | Path) -> str:
     sources = sorted({r.prov.source for r in records})
     lines = [

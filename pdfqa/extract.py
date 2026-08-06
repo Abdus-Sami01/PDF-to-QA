@@ -43,7 +43,7 @@ def load(path: str | Path, backend: str = "auto", assets_dir: str | Path | None 
                 raise
     if backend in ("auto", "pdfminer"):
         try:
-            return _from_pdfminer(p)
+            return _from_pdfminer(p, assets_dir, dpi)
         except ImportError:
             if backend == "pdfminer":
                 raise
@@ -440,34 +440,115 @@ def _plausible_table(grid: list[list[str]], min_fill: float = 0.5) -> bool:
     return bool(cells) and filled / len(cells) >= min_fill
 
 
-def _from_pdfminer(path: Path) -> DocumentTree:
+def _from_pdfminer(path: Path, assets_dir: str | Path | None = None, dpi: int = 144) -> DocumentTree:
     from pdfminer.high_level import extract_pages  # type: ignore
-    from pdfminer.layout import LTTextContainer, LTChar, LTFigure, LTImage  # type: ignore
+    from pdfminer.layout import LTChar, LTCurve, LTFigure, LTImage, LTLine, LTRect, LTTextContainer  # type: ignore
 
+    assets = Path(assets_dir) / path.stem if assets_dir else None
+    if assets:
+        assets.mkdir(parents=True, exist_ok=True)
     raw: list[dict] = []
+
     for pno, layout in enumerate(extract_pages(str(path))):
-        for element in layout:
-            if isinstance(element, (LTFigure, LTImage)):
-                raw.append({"kind": "image", "page": pno, "bbox": tuple(element.bbox), "text": "", "size": 0.0, "bold": False})
-                continue
-            if not isinstance(element, LTTextContainer):
-                continue
-            body = element.get_text().strip()
-            if not body:
-                continue
-            sizes = [round(c.size, 1) for line in element for c in line if isinstance(c, LTChar)]
-            fonts = [c.fontname.lower() for line in element for c in line if isinstance(c, LTChar)]
-            raw.append(
-                {
-                    "kind": "text",
-                    "page": pno,
-                    "bbox": tuple(element.bbox),
-                    "text": body,
-                    "size": max(sizes) if sizes else 0.0,
-                    "bold": any("bold" in f for f in fonts),
-                }
-            )
+        page_blocks: list[dict] = []
+        images: list[dict] = []
+
+        def visit(container):
+            for element in container:
+                if isinstance(element, (LTFigure, LTImage, LTLine, LTRect, LTCurve)):
+                    x0, y0, x1, y1 = element.bbox
+                    if max(x1 - x0, y1 - y0) >= MIN_STROKE_SIDE:
+                        images.append({"kind": "image", "page": pno, "bbox": tuple(element.bbox), "text": "", "size": 0.0, "bold": False})
+                    if isinstance(element, LTFigure):
+                        visit(element)
+                    continue
+                if not isinstance(element, LTTextContainer):
+                    continue
+                body = element.get_text().strip()
+                if not body:
+                    continue
+                sizes = [round(c.size, 1) for line in element for c in line if isinstance(c, LTChar)]
+                fonts = [c.fontname.lower() for line in element for c in line if isinstance(c, LTChar)]
+                page_blocks.append(
+                    {
+                        "kind": "text",
+                        "page": pno,
+                        "bbox": tuple(element.bbox),
+                        "text": body,
+                        "size": max(sizes) if sizes else 0.0,
+                        "bold": any("bold" in f for f in fonts),
+                    }
+                )
+
+        visit(layout)
+        figures = _cluster_regions(images, _cluster_gap(page_blocks))
+        consumed = _absorb_labels(figures, page_blocks)
+        page_blocks = [b for b in page_blocks if id(b) not in consumed]
+        if assets:
+            page_size = (layout.bbox[2], layout.bbox[3])
+            for i, fig in enumerate(figures):
+                render_region(path, pno, fig["bbox"], page_size, assets / f"p{pno:03d}-fig{i:02d}.png", dpi, fig)
+        page_blocks.extend(figures)
+        page_blocks.sort(key=lambda b: (-round(b["bbox"][3], 1), b["bbox"][0]))
+        raw.extend(page_blocks)
+
     return _assemble(raw, [], source=path.name, title=_pdf_title(raw, path))
+
+
+def render_region(pdf: Path, page_no: int, bbox: tuple, page_size: tuple, out_path: Path, dpi: int, sink: dict) -> None:
+    """Rasterise a PDF region with pypdfium2 — the renderer for backends that cannot draw, like pdfminer."""
+    try:
+        import pypdfium2  # type: ignore
+    except ImportError:
+        return
+    width, height = page_size
+    x0, y0, x1, y1 = bbox
+    x0, y0 = max(0.0, x0 - CLIP_PAD), max(0.0, y0 - CLIP_PAD)
+    x1, y1 = min(width, x1 + CLIP_PAD), min(height, y1 + CLIP_PAD)
+    if x1 - x0 < MIN_FIGURE_SIDE or y1 - y0 < MIN_FIGURE_SIDE:
+        return
+    if ((x1 - x0) * (y1 - y0)) / max(1.0, width * height) > MAX_PAGE_COVERAGE:
+        return
+    try:
+        doc = pypdfium2.PdfDocument(str(pdf))
+        page = doc[page_no]
+        bitmap = page.render(scale=dpi / 72.0, crop=(x0, y0, width - x1, height - y1))
+        _write_png(out_path, bitmap.width, bitmap.height, bitmap.stride, bytes(bitmap.buffer), bitmap.n_channels)
+        doc.close()
+    except Exception:
+        return
+    sink["image_path"] = str(out_path)
+    sink["image_width"] = bitmap.width
+    sink["image_height"] = bitmap.height
+    sink["image_dpi"] = dpi
+
+
+def _write_png(path: Path, width: int, height: int, stride: int, buf: bytes, channels: int) -> None:
+    """Minimal PNG writer so rendering needs no imaging library; pdfium hands back BGR rows."""
+    import struct
+    import zlib
+
+    raw = bytearray()
+    for y in range(height):
+        row = buf[y * stride : y * stride + width * channels]
+        raw.append(0)
+        if channels >= 3:
+            rgb = bytearray(width * 3)
+            rgb[0::3] = row[2::channels]
+            rgb[1::3] = row[1::channels]
+            rgb[2::3] = row[0::channels]
+            raw += rgb
+        else:
+            raw += row
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2 if channels >= 3 else 0, 0, 0, 0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b"")
+    )
 
 
 def _pdf_title(raw: list[dict], path: Path) -> str:

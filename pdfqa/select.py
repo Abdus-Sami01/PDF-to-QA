@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import re
 from collections import defaultdict
+from pathlib import Path
 
 from .llm import Runtime
 from .records import Chunk, QARecord
@@ -97,6 +99,69 @@ def dedup_chunks(chunks: list[Chunk], threshold: float = 0.85) -> tuple[list[Chu
 
 def dedup_questions_lexical(records: list[QARecord], threshold: float = 0.8) -> tuple[list[QARecord], list[QARecord]]:
     return dedup_lexical(records, lambda r: r.question, threshold)
+
+
+def load_questions(paths: list[str]) -> list[str]:
+    """Pull the question text out of previously exported JSONL, whatever format it was written in."""
+    out: list[str] = []
+    for raw in paths:
+        p = Path(raw)
+        files = sorted(p.rglob("*.jsonl")) if p.is_dir() else [p]
+        for f in files:
+            if not f.exists():
+                continue
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                q = _question_of(row)
+                if q:
+                    out.append(q)
+    return out
+
+
+def _question_of(row: dict) -> str:
+    for key in ("question", "prompt", "instruction"):
+        if isinstance(row.get(key), str) and row[key].strip():
+            return row[key]
+    for key in ("messages", "conversations"):
+        turns = row.get(key)
+        if isinstance(turns, list):
+            for t in turns:
+                if not isinstance(t, dict):
+                    continue
+                if t.get("role") == "user" or t.get("from") in ("human", "user"):
+                    content = t.get("content") or t.get("value")
+                    if isinstance(content, str):
+                        return content
+                    if isinstance(content, list):
+                        text = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+                        if text:
+                            return text[0]
+    return ""
+
+
+def dedup_against(records: list[QARecord], reference_questions: list[str], threshold: float = 0.8) -> tuple[list[QARecord], list[QARecord]]:
+    """Drop questions that near-duplicate an earlier export, so a re-run over a growing corpus adds only new data."""
+    if not reference_questions:
+        return records, []
+    index = LSHIndex()
+    for i, q in enumerate(reference_questions):
+        index.add(f"ref{i}", q)
+    ref_keys = set(index.signatures)
+    kept, dropped = [], []
+    for i, rec in enumerate(records):
+        key = f"new{i}"
+        index.add(key, rec.question)
+        collision = any(
+            cand in ref_keys and jaccard_est(index.signatures[key], index.signatures[cand]) >= threshold
+            for cand in index.candidates(key)
+        )
+        (dropped if collision else kept).append(rec)
+    return kept, dropped
 
 
 # --------------------------------------------------------------------------- dense space

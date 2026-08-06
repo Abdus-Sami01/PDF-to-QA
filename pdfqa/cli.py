@@ -1,4 +1,4 @@
-"""Command line entry point: `pdfqa run`, `inspect`, `graph`, `cache`, `init`."""
+"""Command line entry point: `pdfqa run`, `inspect`, `graph`, `report`, `cache`, `init`."""
 
 from __future__ import annotations
 
@@ -11,10 +11,12 @@ from .cache import Store
 from .chunking import chunk_tree
 from .config import Config
 from .docast import HEADING
+from .export import audit, load_records
 from .extract import load
 from .graph import build_graph, dump
 from .llm import Runtime
 from .pipeline import Pipeline
+from .select import distribution_report
 
 
 def _progress(stage: str, info: dict) -> None:
@@ -29,6 +31,8 @@ def _config(args) -> Config:
         cfg.outdir = args.out
     if getattr(args, "formats", None):
         cfg.formats = args.formats
+    if getattr(args, "against", None):
+        cfg.select.against = args.against
     if getattr(args, "no_cache", False):
         cfg.cache = False
     if getattr(args, "backend", None):
@@ -101,6 +105,33 @@ def cmd_graph(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    records = load_records(args.path)
+    if not records:
+        print(f"no raw.jsonl records under {args.path}", file=sys.stderr)
+        return 1
+    summary = audit(records) | {"composition": distribution_report(records)}
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+    comp = summary["composition"]
+    print(f"records: {summary['count']}   mean quality: {comp['quality_mean']}   "
+          f"p10/p50/p90: {summary['quality'].get('p10')}/{summary['quality'].get('p50')}/{summary['quality'].get('p90')}")
+    print(f"task: {comp['task']}\ndifficulty: {comp['difficulty']}\npersona: {comp['persona']}")
+    print(f"\ndpo pairs: {summary['with_rejected']}   multimodal: {summary['with_images']}   "
+          f"tool traces: {summary['with_tool_trace']} ({summary['repaired_traces']} repaired)   "
+          f"dialogues: {summary['multi_turn']}")
+    if summary["gates"]:
+        print("\ngate pass rates:")
+        for name, counts in summary["gates"].items():
+            total = counts["pass"] + counts["fail"]
+            print(f"  {name:<20} {counts['pass']}/{total}  ({100 * counts['pass'] / max(1, total):.0f}%)")
+    print("\nper source:")
+    for src, n in list(summary["sources"].items())[:20]:
+        print(f"  {n:>6}  {src}")
+    return 0
+
+
 def cmd_cache(args) -> int:
     store = Store(args.dir)
     if args.clear:
@@ -148,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--vision-model")
     run.add_argument("--no-figures", action="store_true", help="skip figure rendering and multimodal synthesis")
     run.add_argument("--offline", action="store_true", help="skip all LLM-dependent gates and extraction")
+    run.add_argument("--against", nargs="+", help="drop questions that near-duplicate these earlier exports")
     run.add_argument("--no-cache", action="store_true")
     run.set_defaults(func=cmd_run)
 
@@ -167,6 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("--offline", action="store_true")
     gr.add_argument("--json", action="store_true")
     gr.set_defaults(func=cmd_graph, inputs=None, out=None)
+
+    rp = sub.add_parser("report", help="audit an exported dataset: composition, quality, gate pass rates")
+    rp.add_argument("path", help="output directory or a raw.jsonl file")
+    rp.add_argument("--json", action="store_true")
+    rp.set_defaults(func=cmd_report)
 
     ca = sub.add_parser("cache", help="inspect or clear the incremental cache")
     ca.add_argument("--dir", default=".pdfqa-cache")

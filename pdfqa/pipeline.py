@@ -18,12 +18,14 @@ from .llm import Runtime
 from .records import Chunk, Provenance, QARecord
 from .select import (
     balance_difficulty,
+    dedup_against,
     dedup_chunks,
     dedup_questions_lexical,
     dedup_semantic,
     distribution_report,
     dpp_select,
     embed_records,
+    load_questions,
 )
 
 Progress = Callable[[str, dict], None]
@@ -157,7 +159,13 @@ class Pipeline:
             return []
         corpus = merge_graphs(graphs, chunks)
         self.report["corpus_graph"] = corpus.stats() | corpus.meta
+        key = fingerprint(sorted({c.prov.source for c in chunks}), [c.id for c in chunks], PROMPT_VERSION, n, self.cfg.runtime.generate, self.cfg.seed)
+        cached = self.store.get("cross_doc", key)
+        if cached is not None:
+            self.progress("synth.cross_document", {"records": len(cached), "cached": True})
+            return [QARecord.from_dict(d) for d in cached]
         records = synth.generate_cross_document(self.runtime, corpus, n, self.cfg.synth.multihop_per_pair, self.rng)
+        self.store.put("cross_doc", key, [r.as_dict() for r in records])
         self.progress("synth.cross_document", {"records": len(records), "documents": len(graphs)})
         return records
 
@@ -184,6 +192,10 @@ class Pipeline:
 
     def select(self, records: list[QARecord]) -> list[QARecord]:
         s = self.cfg.select
+        if s.against:
+            reference = load_questions(s.against)
+            records, seen_before = dedup_against(records, reference, s.lexical_threshold)
+            self.progress("dedup.against", {"reference": len(reference), "dropped": len(seen_before), "kept": len(records)})
         records, lex_dropped = dedup_questions_lexical(records, s.lexical_threshold)
         vectors = embed_records(self.runtime, records)
         records, sem_dropped = dedup_semantic(records, vectors, s.semantic_threshold)

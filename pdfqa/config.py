@@ -58,6 +58,7 @@ class VerifyConfig:
 @dataclass
 class SelectConfig:
     lexical_threshold: float = 0.8
+    against: list[str] = field(default_factory=list)
     semantic_threshold: float = 0.92
     dpp: bool = True
     budget_tokens: int | None = None
