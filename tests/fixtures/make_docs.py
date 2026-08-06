@@ -15,6 +15,8 @@ HTML = """<html><head><title>Sparse Routing Docs</title></head><body>
 <table><tr><th>Model</th><th>Accuracy</th></tr><tr><td>Dense</td><td>61.2</td></tr><tr><td>k=4</td><td>74.8</td></tr></table>
 <pre>print("routing")</pre>
 <img src="chart.png" alt="accuracy by routing width">
+<img src="https://example.com/remote.png" alt="remote chart">
+<img src="missing.png" alt="absent chart">
 <script>ignored()</script>
 </body></html>"""
 
@@ -92,8 +94,16 @@ def build_epub(path: Path) -> Path:
     return path
 
 
+def build_png(path: Path, width: int = 8, height: int = 8) -> Path:
+    from pdfqa.extract import _write_png
+
+    _write_png(path, width, height, width * 3, bytes([40, 90, 200] * width * height), 3)
+    return path
+
+
 def build_all(directory: Path) -> dict[str, Path]:
     directory.mkdir(parents=True, exist_ok=True)
+    build_png(directory / "chart.png")
     made = {
         "html": directory / "doc.html",
         "latex": directory / "doc.tex",

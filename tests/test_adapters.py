@@ -42,8 +42,49 @@ def test_html_keeps_code_and_images(docs):
     tree = load(docs["html"])
     assert tree.nodes([CODE])[0].text == 'print("routing")'
     figure = tree.nodes([FIGURE])[0]
-    assert figure.attrs["image_path"] == "chart.png"
+    assert figure.attrs["src"] == "chart.png"
     assert figure.attrs["alt"] == "accuracy by routing width"
+
+
+def test_html_image_paths_resolve_against_the_document(docs):
+    figures = load(docs["html"]).nodes([FIGURE])
+    resolved = [f for f in figures if f.attrs["image_path"]]
+    assert len(resolved) == 1
+    assert Path(resolved[0].attrs["image_path"]).exists()
+    assert resolved[0].attrs["caption"] == "accuracy by routing width"
+
+
+def test_remote_and_missing_images_resolve_to_nothing(docs):
+    by_src = {f.attrs["src"]: f.attrs["image_path"] for f in load(docs["html"]).nodes([FIGURE])}
+    assert by_src["https://example.com/remote.png"] == ""
+    assert by_src["missing.png"] == ""
+
+
+def test_html_figures_reach_chunks_as_images(docs):
+    chunks = chunk_tree(load(docs["html"]), max_tokens=300)
+    assert any(c.images() for c in chunks)
+
+
+def test_epub_images_are_extracted_from_the_archive(tmp_path):
+    import zipfile
+
+    from make_docs import build_png
+
+    png = build_png(tmp_path / "fig.png")
+    epub = tmp_path / "with_image.epub"
+    chapter = '<html><body><h1>Ch</h1><p>Body text about routing widths.</p><img src="images/fig.png" alt="a chart"></body></html>'
+    opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf">'
+           '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Illustrated</dc:title></metadata>'
+           '<manifest><item id="c1" href="c1.xhtml"/></manifest><spine><itemref idref="c1"/></spine></package>')
+    with zipfile.ZipFile(epub, "w") as z:
+        z.writestr("content.opf", opf)
+        z.writestr("c1.xhtml", chapter)
+        z.writestr("images/fig.png", png.read_bytes())
+
+    tree = load(epub, assets_dir=tmp_path / "assets")
+    figure = tree.nodes([FIGURE])[0]
+    assert Path(figure.attrs["image_path"]).exists()
+    assert Path(figure.attrs["image_path"]).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_html_nesting_gives_breadcrumbs(docs):

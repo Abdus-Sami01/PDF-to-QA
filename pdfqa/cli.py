@@ -1,4 +1,4 @@
-"""Command line entry point: `pdfqa run`, `inspect`, `graph`, `report`, `cache`, `init`."""
+"""Command line entry point: `pdfqa run`, `inspect`, `graph`, `ask`, `eval`, `report`, `cache`, `init`."""
 
 from __future__ import annotations
 
@@ -12,10 +12,12 @@ from .chunking import chunk_tree
 from .config import Config
 from .docast import EQUATION, HEADING
 from .export import audit, load_records
+from .evaluate import evaluate
 from .extract import load
 from .graph import build_graph, dump
 from .llm import Runtime
 from .pipeline import Pipeline
+from .retrieve import Index, answer
 from .select import distribution_report
 
 
@@ -141,6 +143,59 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_ask(args) -> int:
+    cfg = _config(args)
+    index = Index.load(args.corpus)
+    runtime = Runtime(cfg.runtime_specs())
+    if not args.lexical_only:
+        index.embed(runtime if cfg.runtime.embed else None)
+    found = answer(runtime, index, args.question, args.k, args.alpha)
+    if args.json:
+        print(json.dumps({
+            "question": args.question,
+            "answer": found.text,
+            "unanswerable": found.unanswerable,
+            "citations": found.citations(),
+            "hits": [{"id": h.passage.id, "source": h.passage.source, "breadcrumb": h.passage.breadcrumb,
+                      "score": round(h.score, 4), "lexical": round(h.lexical, 4), "dense": round(h.dense, 4)}
+                     for h in found.hits],
+        }, indent=2))
+        return 0
+    print(found.text + "\n")
+    print("sources:")
+    for h in found.hits:
+        print(f"  {h.score:.3f}  {h.passage.citation():<28} {h.passage.breadcrumb[:60]}")
+    return 0 if not found.unanswerable else 2
+
+
+def cmd_eval(args) -> int:
+    cfg = _config(args)
+    records = load_records(args.path)
+    if not records:
+        print(f"no raw.jsonl records under {args.path}", file=sys.stderr)
+        return 1
+    runtime = Runtime(cfg.runtime_specs())
+    index = None
+    if args.mode == "retrieval":
+        index = Index.load(args.corpus or Path(args.path).parent)
+        index.embed(runtime if cfg.runtime.embed else None)
+    summary = evaluate(runtime, records, index, args.mode, args.k, args.limit)
+
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+    print(f"mode: {summary['mode']}   graded: {summary['count']}")
+    print(f"accuracy: {summary['accuracy']:.1%}   partial: {summary['partial_rate']:.1%}   "
+          f"token F1: {summary['token_f1']:.3f}   numeric match: {summary['numeric_match']:.3f}")
+    if "retrieval_recall" in summary:
+        print(f"retrieval recall (correct source in top-{args.k}): {summary['retrieval_recall']:.1%}")
+    print("\nby task:")
+    for task, counts in summary["by_task"].items():
+        total = sum(counts.values())
+        print(f"  {task:<16} {counts.get('correct', 0)}/{total} correct")
+    return 0
+
+
 def cmd_cache(args) -> int:
     store = Store(args.dir)
     if args.clear:
@@ -216,6 +271,30 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("path", help="output directory or a raw.jsonl file")
     rp.add_argument("--json", action="store_true")
     rp.set_defaults(func=cmd_report)
+
+    ask = sub.add_parser("ask", help="answer a question from an exported corpus, with citations")
+    ask.add_argument("question")
+    ask.add_argument("corpus", nargs="?", default="out", help="output directory or a corpus.jsonl file")
+    ask.add_argument("-c", "--config")
+    ask.add_argument("--backend")
+    ask.add_argument("--model")
+    ask.add_argument("-k", type=int, default=5, help="passages to retrieve")
+    ask.add_argument("--alpha", type=float, default=0.5, help="1.0 pure BM25, 0.0 pure embedding")
+    ask.add_argument("--lexical-only", action="store_true")
+    ask.add_argument("--json", action="store_true")
+    ask.set_defaults(func=cmd_ask, inputs=None, out=None)
+
+    ev = sub.add_parser("eval", help="grade a model against a generated split")
+    ev.add_argument("path", help="dataset directory or raw.jsonl (usually the test split)")
+    ev.add_argument("-c", "--config")
+    ev.add_argument("--backend")
+    ev.add_argument("--model")
+    ev.add_argument("--mode", choices=["context", "retrieval", "closed"], default="context")
+    ev.add_argument("--corpus", help="corpus for retrieval mode; defaults to the dataset's parent")
+    ev.add_argument("-k", type=int, default=5)
+    ev.add_argument("--limit", type=int)
+    ev.add_argument("--json", action="store_true")
+    ev.set_defaults(func=cmd_eval, inputs=None, out=None)
 
     ca = sub.add_parser("cache", help="inspect or clear the incremental cache")
     ca.add_argument("--dir", default=".pdfqa-cache")

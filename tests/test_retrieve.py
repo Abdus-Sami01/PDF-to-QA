@@ -1,0 +1,215 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from pdfqa.chunking import chunk_tree
+from pdfqa.cli import main
+from pdfqa.evaluate import evaluate, grade_one, numeric_match, token_f1
+from pdfqa.export import load_records
+from pdfqa.pipeline import Pipeline
+from pdfqa.records import Provenance, QARecord
+from pdfqa.retrieve import Index, Passage, answer, terms
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def index(tree, tree2_or_none=None):
+    return Index.from_chunks(chunk_tree(tree, max_tokens=300))
+
+
+@pytest.fixture
+def dataset(config):
+    config.formats = ["raw"]
+    Pipeline(config).run()
+    return config
+
+
+# ------------------------------------------------------------------ index
+
+
+def test_index_is_built_from_chunks(index):
+    assert index.passages
+    assert all(p.source == "sample.md" for p in index.passages)
+    assert index.n == len(index.passages)
+
+
+def test_bm25_ranks_the_relevant_section_first(index):
+    hits = index.search("how many experts does the router select", k=3)
+    assert hits
+    assert "expert" in hits[0].passage.text.lower()
+
+
+def test_rare_terms_beat_common_ones(index):
+    hits = index.search("load-balancing coefficient", k=3)
+    assert "load-balancing" in hits[0].passage.text.lower()
+
+
+def test_dense_scores_appear_only_after_embedding(index):
+    assert all(h.dense == 0.0 for h in index.search("routing", k=3))
+    index.embed()
+    assert any(h.dense > 0.0 for h in index.search("routing", k=3))
+
+
+def test_alpha_switches_between_lexical_and_dense(index):
+    index.embed()
+    lexical = index.search("routing temperature", k=3, alpha=1.0)
+    dense = index.search("routing temperature", k=3, alpha=0.0)
+    assert all(h.score == h.lexical for h in lexical)
+    assert all(abs(h.score - h.dense) < 1e-9 for h in dense)
+
+
+def test_query_with_no_overlap_returns_nothing(index):
+    assert index.search("quarterly dividend policy for shareholders", k=3) == []
+
+
+def test_score_floor_still_applies_once_embeddings_make_everything_a_candidate(index):
+    index.embed()
+    assert index.search("quarterly dividend policy for shareholders", k=5) == []
+    assert index.search("quarterly dividend policy for shareholders", k=5, min_score=0.0)
+
+
+def test_answer_refuses_when_every_hit_is_below_the_floor(runtime, index):
+    index.embed()
+    found = answer(runtime, index, "What is the quarterly dividend policy for shareholders?")
+    assert found.unanswerable and found.hits == []
+
+
+def test_terms_drop_stopwords():
+    assert "the" not in terms("the router and the experts")
+    assert "router" in terms("the router and the experts")
+
+
+def test_index_loads_from_an_exported_corpus(dataset):
+    loaded = Index.load(dataset.outdir)
+    assert loaded.passages
+    assert all(p.id and p.text for p in loaded.passages)
+
+
+def test_index_load_reports_an_empty_corpus(tmp_path):
+    with pytest.raises(ValueError, match="no corpus.jsonl"):
+        Index.load(tmp_path)
+
+
+def test_citation_prefers_page_then_section():
+    with_page = Passage(id="a", text="x", source="paper.pdf", pages=[4], breadcrumb="Doc > Results")
+    without = Passage(id="b", text="x", source="notes.md", breadcrumb="Doc > Method")
+    assert with_page.citation() == "paper.pdf p4"
+    assert without.citation() == "notes.md Method"
+
+
+# ------------------------------------------------------------------ answering
+
+
+def test_answer_cites_the_passages_it_used(runtime, index):
+    found = answer(runtime, index, "How many experts does SparseRoute select?")
+    assert not found.unanswerable
+    assert "[1]" in found.text
+    assert found.citations()
+
+
+def test_answer_refuses_when_the_corpus_cannot_support_it(runtime, index):
+    found = answer(runtime, index, "What is the company dividend policy for shareholders?")
+    assert found.unanswerable
+
+
+def test_refusal_needs_the_marker_to_be_the_whole_answer():
+    from pdfqa.retrieve import is_refusal
+
+    assert is_refusal("UNANSWERABLE")
+    assert is_refusal("  unanswerable.  ")
+    assert not is_refusal("The passages do not say UNANSWERABLE is required, they report 74.8.")
+    assert not is_refusal("Reply with exactly UNANSWERABLE if the passages fall short; here they do not.")
+
+
+def test_ask_command_prints_answer_and_sources(dataset, capsys):
+    assert main(["ask", "How many experts does SparseRoute select?", dataset.outdir]) == 0
+    out = capsys.readouterr().out
+    assert "sources:" in out
+
+
+def test_ask_command_json_mode(dataset, capsys):
+    assert main(["ask", "How many experts does SparseRoute select?", dataset.outdir, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hits"] and "answer" in payload
+
+
+# ------------------------------------------------------------------ grading
+
+
+def test_token_f1_rewards_overlap():
+    assert token_f1("four of 32 experts", "four of 32 experts") == pytest.approx(1.0)
+    assert token_f1("four of 32 experts", "completely unrelated wording") == 0.0
+    assert 0.0 < token_f1("four of 32 experts per token", "four of 32 experts") < 1.0
+
+
+def test_numeric_match_is_all_or_nothing_per_number():
+    assert numeric_match("accuracy is 74.8", "we measured 74.8") == 1.0
+    assert numeric_match("accuracy is 74.8", "we measured 72.9") == 0.0
+    assert numeric_match("no numbers here", "still none") == 1.0
+    assert numeric_match("61.2 and 74.8", "only 74.8") == 0.5
+
+
+def test_grade_downgrades_a_correct_verdict_that_lost_a_number(runtime):
+    rec = QARecord(question="What accuracy?", answer="It reaches 74.8 accuracy.", context="c", prov=Provenance(source="s"))
+    graded = grade_one(runtime, rec, "It reaches high accuracy on the benchmark.")
+    assert graded.verdict in ("partial", "incorrect")
+    assert graded.numeric_match == 0.0
+
+
+def test_grade_accepts_a_matching_answer(runtime):
+    rec = QARecord(question="What accuracy?", answer="It reaches 74.8 accuracy.", context="c", prov=Provenance(source="s"))
+    graded = grade_one(runtime, rec, "The reported figure is 74.8 accuracy.")
+    assert graded.verdict == "correct"
+    assert graded.numeric_match == 1.0
+
+
+def test_empty_prediction_is_incorrect_without_calling_the_judge(runtime):
+    rec = QARecord(question="q", answer="It reaches 74.8 accuracy.", context="c", prov=Provenance(source="s"))
+    before = len(runtime.calls)
+    graded = grade_one(runtime, rec, "   ")
+    assert graded.verdict == "incorrect" and graded.detail == "empty prediction"
+    assert len(runtime.calls) == before
+
+
+# ------------------------------------------------------------------ eval modes
+
+
+def test_context_mode_grades_every_record(runtime, dataset):
+    records = load_records(dataset.outdir)
+    summary = evaluate(runtime, records, mode="context", limit=3)
+    assert summary["count"] == min(3, len(records))
+    assert set(summary["verdicts"]) <= {"correct", "partial", "incorrect"}
+    assert "by_task" in summary
+
+
+def test_retrieval_mode_reports_recall(runtime, dataset):
+    records = load_records(dataset.outdir)
+    index = Index.load(dataset.outdir)
+    summary = evaluate(runtime, records, index, mode="retrieval", limit=3)
+    assert "retrieval_recall" in summary
+    assert all(r["citations"] is not None for r in summary["results"])
+
+
+def test_retrieval_mode_requires_an_index(runtime, dataset):
+    with pytest.raises(ValueError, match="needs an index"):
+        evaluate(runtime, load_records(dataset.outdir), None, mode="retrieval", limit=1)
+
+
+def test_closed_book_mode_scores_worse_than_context(runtime, dataset):
+    records = load_records(dataset.outdir)
+    with_context = evaluate(runtime, records, mode="context", limit=4)
+    closed = evaluate(runtime, records, mode="closed", limit=4)
+    assert closed["accuracy"] <= with_context["accuracy"]
+
+
+def test_eval_command_prints_a_summary(dataset, capsys):
+    assert main(["eval", dataset.outdir, "--limit", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "accuracy" in out and "by task" in out
+
+
+def test_eval_command_on_an_empty_directory_fails_cleanly(tmp_path, capsys):
+    assert main(["eval", str(tmp_path)]) == 1
+    assert "no raw.jsonl" in capsys.readouterr().err

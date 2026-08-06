@@ -13,6 +13,14 @@ FIXTURE = Path(__file__).parent / "fixtures" / "sample.md"
 NUM = re.compile(r"-?\d+(?:\.\d+)?")
 
 
+def _between(text: str, start: str, end: str) -> str:
+    i = text.find(start)
+    if i == -1:
+        return ""
+    j = text.find(end, i + len(start))
+    return text[i + len(start) : j if j != -1 else len(text)].strip()
+
+
 def _context(prompt: str) -> str:
     parts = prompt.split("---")
     return parts[1] if len(parts) > 2 else prompt
@@ -36,6 +44,22 @@ def scripted(prompt: str, system: str = "") -> str:
         return json.dumps({"applicable": True,
                            "constraints": "(declare-const a Real)(assert (= a 74.8))",
                            "negation": "(declare-const a Real)(assert (= a 74.8))(assert (not (= a 74.8)))"})
+    if prompt.startswith("Answer using only this context"):
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", ctx) if NUM.search(s)]
+        return sentences[0][:300] if sentences else "The context does not state that."
+    if "numbered passages" in prompt:
+        if "routing" in prompt.lower() or "sparseroute" in prompt.lower() or "accuracy" in prompt.lower():
+            return "SparseRoute selects 4 of 32 experts per token and reaches 74.8 accuracy [1]."
+        return "UNANSWERABLE"
+    if "Grade a candidate answer" in prompt:
+        ref = _between(prompt, "Reference answer:", "Candidate answer:")
+        cand = _between(prompt, "Candidate answer:", "\n\n")
+        ref_nums, cand_nums = set(NUM.findall(ref)), set(NUM.findall(cand))
+        if ref_nums and not (ref_nums & cand_nums):
+            return json.dumps({"verdict": "incorrect", "confidence": 0.9, "missing": sorted(ref_nums), "wrong": []})
+        return json.dumps({"verdict": "correct", "confidence": 0.9, "missing": [], "wrong": []})
+    if prompt.startswith("Answer the question from your own knowledge"):
+        return "UNKNOWN"
     if "knowledge graph" in prompt:
         return json.dumps(
             {

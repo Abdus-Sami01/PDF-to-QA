@@ -89,10 +89,30 @@ BLOCK_TAGS = {"p", "div", "section", "article", "li", "blockquote", "dd", "dt"}
 SKIP_TAGS = {"script", "style", "nav", "header", "footer", "aside", "noscript", "svg", "head", "title"}
 
 
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def resolve_image(src: str, base: Path | None, extracted: dict[str, str] | None = None) -> str:
+    """Turn an img src into a path on disk when one exists, so figure QA can actually open it."""
+    if not src or src.startswith(("http://", "https://", "data:")):
+        return ""
+    key = src.split("#")[0].split("?")[0]
+    if extracted:
+        hit = extracted.get(key) or extracted.get(Path(key).name)
+        if hit:
+            return hit
+    if base is None:
+        return ""
+    candidate = (base / key).resolve()
+    return str(candidate) if candidate.exists() and candidate.suffix.lower() in IMAGE_SUFFIXES else ""
+
+
 class _HTMLReader(HTMLParser):
-    def __init__(self, builder: Builder):
+    def __init__(self, builder: Builder, base: Path | None = None, extracted: dict[str, str] | None = None):
         super().__init__(convert_charrefs=True)
         self.b = builder
+        self.base = base
+        self.extracted = extracted or {}
         self.buf: list[str] = []
         self.skip_depth = 0
         self.mode: list[str] = []
@@ -139,7 +159,8 @@ class _HTMLReader(HTMLParser):
             src = dict(attrs).get("src", "")
             alt = dict(attrs).get("alt", "")
             self.flush()
-            self.b.block(FIGURE, alt, {"image_path": src, "alt": alt})
+            resolved = resolve_image(src, self.base, self.extracted)
+            self.b.block(FIGURE, alt, {"image_path": resolved, "src": src, "alt": alt, "caption": alt})
         elif tag == "br":
             self.buf.append("\n")
         elif tag in BLOCK_TAGS:
@@ -188,14 +209,14 @@ class _HTMLReader(HTMLParser):
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 
 
-def from_html(html: str, source: str = "inline") -> DocumentTree:
+def from_html(html: str, source: str = "inline", base: Path | None = None, extracted: dict[str, str] | None = None) -> DocumentTree:
     m = TITLE_RE.search(html)
     title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
     if not title:
         h1 = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.I | re.S)
         title = re.sub(r"<[^>]+>|\s+", " ", h1.group(1)).strip() if h1 else source
     builder = Builder(title, source)
-    reader = _HTMLReader(builder)
+    reader = _HTMLReader(builder, base, extracted)
     reader.feed(html)
     reader.flush()
     return builder.build("html")
@@ -278,10 +299,25 @@ def _docx_is_caption(element) -> bool:
 # --------------------------------------------------------------------------- epub
 
 
-def from_epub(path: Path) -> DocumentTree:
+def _extract_epub_images(archive: zipfile.ZipFile, assets: Path) -> dict[str, str]:
+    """Images live inside the zip, so unpack them once and hand back a href -> disk path map."""
+    out: dict[str, str] = {}
+    assets.mkdir(parents=True, exist_ok=True)
+    for name in archive.namelist():
+        if Path(name).suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        target = assets / Path(name).name
+        target.write_bytes(archive.read(name))
+        out[name] = str(target)
+        out[Path(name).name] = str(target)
+    return out
+
+
+def from_epub(path: Path, assets_dir: str | Path | None = None) -> DocumentTree:
     import xml.etree.ElementTree as ET
 
     with zipfile.ZipFile(path) as z:
+        extracted = _extract_epub_images(z, Path(assets_dir) / path.stem) if assets_dir else {}
         names = z.namelist()
         opf = next((n for n in names if n.endswith(".opf")), None)
         order = []
@@ -304,7 +340,7 @@ def from_epub(path: Path) -> DocumentTree:
             order = [n for n in names if n.lower().endswith((".xhtml", ".html", ".htm"))]
 
         builder = Builder(title, path.name)
-        reader = _HTMLReader(builder)
+        reader = _HTMLReader(builder, extracted=extracted)
         for name in order:
             reader.feed(z.read(name).decode("utf-8", "replace"))
             reader.flush()
@@ -488,7 +524,7 @@ SUFFIXES = {
 }
 
 
-def load(path: str | Path) -> DocumentTree:
+def load(path: str | Path, assets_dir: str | Path | None = None) -> DocumentTree:
     p = Path(path)
     fmt = SUFFIXES.get(p.suffix.lower())
     if fmt is None:
@@ -496,10 +532,10 @@ def load(path: str | Path) -> DocumentTree:
     if fmt == "docx":
         return from_docx(p)
     if fmt == "epub":
-        return from_epub(p)
+        return from_epub(p, assets_dir)
     text = p.read_text(encoding="utf-8", errors="replace")
     if fmt == "html":
-        return from_html(text, p.name)
+        return from_html(text, p.name, base=p.parent)
     if fmt == "latex":
         return from_latex(text, p.name)
     if fmt == "notebook":

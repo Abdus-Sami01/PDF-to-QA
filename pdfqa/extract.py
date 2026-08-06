@@ -38,7 +38,7 @@ def load(path: str | Path, backend: str = "auto", assets_dir: str | Path | None 
         from .adapters import SUFFIXES, load as load_adapter
 
         if suffix in SUFFIXES:
-            return load_adapter(p)
+            return load_adapter(p, assets_dir)
         raise ValueError(f"unsupported input type: {suffix}; supported: .pdf .md .txt {' '.join(sorted(SUFFIXES))}")
     if backend in ("auto", "pymupdf"):
         try:

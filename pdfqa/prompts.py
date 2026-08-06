@@ -332,6 +332,36 @@ Schema:
 
 """ + JSON_RULE
 
+GROUNDED_ANSWER = """Answer the question using only the numbered passages below.
+
+Question: {question}
+
+Passages:
+---
+{passages}
+---
+
+Cite the passage number in square brackets after each claim that depends on it.
+Do not use knowledge from outside these passages. If they do not contain the answer, reply with
+exactly {marker} and nothing else.
+Answer in plain prose, no preamble."""
+
+GRADE_ANSWER = """Grade a candidate answer against a reference answer for the same question.
+
+Question: {question}
+Reference answer: {reference}
+Candidate answer: {candidate}
+
+"correct" if the candidate states the same facts as the reference, even in different words.
+"partial" if it gets some of it right but omits or garbles something material.
+"incorrect" if it contradicts the reference or answers a different question.
+Numbers must match to be correct; a different figure is incorrect, not partial.
+
+Schema:
+{{"verdict":"correct|partial|incorrect","confidence":0.0,"missing":["..."],"wrong":["..."]}}
+
+""" + JSON_RULE
+
 PERSONAS = {
     "domain_expert": "a specialist in this field who wants precision and cites prior work",
     "non_technical_stakeholder": "a manager who needs the practical implication, no jargon",

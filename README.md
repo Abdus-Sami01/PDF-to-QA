@@ -19,7 +19,8 @@ PDF needs a third-party parser; every other adapter is standard library (DOCX an
 archives of XML, notebooks are JSON).
 
 **Outputs:** a fine-tuning dataset in ten formats, a retrieval corpus, and leak-free train/val/test
-splits — from the same pass over the documents.
+splits — from the same pass over the documents. The corpus is then queryable (`ask`) and the splits
+gradeable (`eval`), so generate → retrieve → evaluate all run on one parse of the source.
 
 ## What it does
 
@@ -181,6 +182,46 @@ the report rather than quietly leaking:
            "note": "fewer than 3 source documents; split row-wise, so contexts overlap across splits"}
 ```
 
+## Querying the corpus
+
+Because the corpus is exported, it can be searched — hybrid BM25 plus embeddings, answered with
+citations back to source and page:
+
+```bash
+pdfqa ask "How many experts does the router select per token?" dataset/
+```
+
+```
+SparseRoute selects 4 of 32 experts per token, with routing temperature 0.7 [1].
+
+sources:
+  0.544  sample.md p0    Sparse Routing > 2 Method > 2.1 Router
+  0.523  sample.md p0    Sparse Routing > 4 Results
+```
+
+Hits below a score floor are dropped rather than passed to the model. That matters once embeddings
+are on: cosine gives *every* passage a nonzero score, so without a floor an off-topic question
+still retrieves five confident-looking passages and invites a confident wrong answer. Below the
+floor the answer is a refusal and the exit code is 2.
+
+## Evaluating a model on what came out
+
+```bash
+pdfqa eval dataset/test --mode retrieval --corpus dataset/
+```
+
+Three modes, and the gap between them is the interesting number:
+
+- `context` — the gold passage is handed over. Measures reading, not retrieval.
+- `retrieval` — the model has to find the passage itself. Also reports how often the correct source
+  document made the top-k.
+- `closed` — nothing is provided. Whatever it scores here, it already knew; that portion of your
+  dataset is teaching it nothing.
+
+Grading is a model judge plus two mechanical checks, and the mechanical ones can overrule: an answer
+the judge calls correct is downgraded to partial if a number from the reference is missing, since
+judges are lenient about digits and a wrong figure is not a wording difference.
+
 ## Auditing what came out
 
 ```bash
@@ -233,6 +274,8 @@ pdfqa cache --clear --stage synth
 pdfqa run <inputs>       # full pipeline (pdf, md, html, docx, epub, tex, ipynb, csv)
 pdfqa inspect <file>     # AST outline, resolved references, rendered images, chunk plan
 pdfqa graph <file>       # knowledge graph stats and multi-hop seed pairs
+pdfqa ask <q> <dir>      # answer from the exported corpus, with citations
+pdfqa eval <dir>         # grade a model against a generated split
 pdfqa report <dir>       # audit a produced dataset
 pdfqa cache              # cache state
 pdfqa init pdfqa.yaml    # starter config
