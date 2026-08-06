@@ -115,10 +115,23 @@ class Pipeline:
         if s.react_per_doc:
             picks = self._sample([c for c in chunks if c.tables or _has_numbers(c)], s.react_per_doc) or self._sample(chunks, s.react_per_doc)
             traces = [t for t in self._map(lambda c: synth.generate_react(self.runtime, c), picks) if t]
+            if s.repair_traces:
+                self._map(synth.repair_trace, traces)
             records.extend(traces)
-            self.progress("synth.react", {"records": len(traces)})
+            self.progress("synth.react", {"records": len(traces), "repaired": sum(1 for t in traces if any(v.get("stage") == "trace_repair" for v in t.prov.verification))})
 
         records.extend(self._augment(records))
+        return records
+
+    def synthesize_cached(self, tree: DocumentTree, chunks: list[Chunk], kg: KnowledgeGraph) -> list[QARecord]:
+        """Synthesis is the expensive stage; checkpoint it per document so a crashed run resumes."""
+        key = fingerprint(tree.source, [c.id for c in chunks], PROMPT_VERSION, self.cfg.synth.__dict__, self.cfg.runtime.generate, self.cfg.seed)
+        cached = self.store.get("synth", key)
+        if cached is not None:
+            self.progress("synth", {"source": tree.source, "records": len(cached), "cached": True})
+            return [QARecord.from_dict(d) for d in cached]
+        records = self.synthesize(chunks, kg)
+        self.store.put("synth", key, [r.as_dict() for r in records])
         return records
 
     def _augment(self, records: list[QARecord]) -> list[QARecord]:
@@ -188,7 +201,7 @@ class Pipeline:
             tree = self.parse(path)
             chunks = self.chunk(tree)
             kg = self.graph(chunks)
-            records = self.synthesize(chunks, kg)
+            records = self.synthesize_cached(tree, chunks, kg)
             self.report["documents"].append(
                 {"source": tree.source, "chunks": len(chunks), "graph": kg.stats(), "generated": len(records)}
             )
@@ -273,6 +286,7 @@ def _chunk_to_dict(c: Chunk) -> dict:
         "text": c.text,
         "kind": c.kind,
         "tables": c.tables,
+        "grids": c.grids,
         "equations": c.equations,
         "figures": c.figures,
         "figure_refs": c.figure_refs,
@@ -288,6 +302,7 @@ def _chunk_from_dict(d: dict) -> Chunk:
         kind=d.get("kind", "section"),
         prov=Provenance(**d["prov"]),
         tables=d.get("tables", []),
+        grids=d.get("grids", []),
         equations=d.get("equations", []),
         figures=d.get("figures", []),
         figure_refs=d.get("figure_refs", []),

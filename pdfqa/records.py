@@ -43,6 +43,7 @@ class Chunk:
     kind: str = "section"
     prov: Provenance = field(default_factory=Provenance)
     tables: list[str] = field(default_factory=list)
+    grids: list[list[list[str]]] = field(default_factory=list)
     equations: list[str] = field(default_factory=list)
     figures: list[str] = field(default_factory=list)
     figure_refs: list[dict] = field(default_factory=list)
@@ -92,6 +93,7 @@ class QARecord:
     rejected: str = ""
     rejection_mode: str = ""
     tool_trace: list[dict] = field(default_factory=list)
+    tool_env: dict = field(default_factory=dict)
     images: list[str] = field(default_factory=list)
     scores: dict[str, float] = field(default_factory=dict)
     flags: list[str] = field(default_factory=list)

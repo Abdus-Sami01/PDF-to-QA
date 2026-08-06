@@ -74,6 +74,7 @@ def _breadcrumb(tree: DocumentTree, section: Node) -> str:
 def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrumb: str, overlap_headings: bool) -> Chunk:
     text_parts = []
     tables, equations, figures, refs = [], [], [], []
+    grids: list[list[list[str]]] = []
     figure_refs: list[dict] = []
     node_ids, pages, bboxes = [], [], []
 
@@ -84,6 +85,8 @@ def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrum
             bboxes.append(list(block.span.bbox))
         if block.kind == TABLE:
             tables.append(block.attrs.get("html") or block.text)
+            if block.attrs.get("grid"):
+                grids.append(block.attrs["grid"])
             text_parts.append(f"[{block.id}] {block.attrs.get('caption', '')}\n{block.text}".strip())
             if block.attrs.get("image_path"):
                 figure_refs.append(_figure_ref(block))
@@ -117,6 +120,7 @@ def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrum
         kind="table" if tables and len(blocks) == 1 else "section",
         prov=prov,
         tables=tables,
+        grids=grids,
         equations=equations,
         figures=figures,
         figure_refs=figure_refs,
@@ -147,6 +151,7 @@ def _merge_small(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[
                 kind=prev.kind,
                 prov=prev.prov.merge(chunk.prov),
                 tables=prev.tables + chunk.tables,
+                grids=prev.grids + chunk.grids,
                 equations=prev.equations + chunk.equations,
                 figures=prev.figures + chunk.figures,
                 figure_refs=prev.figure_refs + chunk.figure_refs,

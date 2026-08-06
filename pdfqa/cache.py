@@ -48,13 +48,14 @@ class Store:
         if not self.enabled:
             return None
         p = self.path(stage, key)
-        if not p.exists():
-            return None
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        if payload.get("schema") != SCHEMA:
+        payload = None
+        if p.exists():
+            try:
+                payload = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                payload = None
+        if payload is None or payload.get("schema") != SCHEMA:
+            self.misses += 1
             return None
         self.hits += 1
         return payload["value"]
@@ -72,7 +73,6 @@ class Store:
         cached = self.get(stage, key)
         if cached is not None:
             return cached
-        self.misses += 1
         value = fn()
         self.put(stage, key, value)
         return value

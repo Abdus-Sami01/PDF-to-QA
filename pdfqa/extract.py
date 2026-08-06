@@ -257,7 +257,7 @@ def _from_pymupdf(path: Path, assets_dir: str | Path | None = None, dpi: int = 1
                 }
             )
         images.extend(_vector_regions(page, pno))
-        figures = _reject_table_overlap(_cluster_regions(images), [t["bbox"] for t in page_tables])
+        figures = _reject_table_overlap(_cluster_regions(images, _cluster_gap(page_blocks)), [t["bbox"] for t in page_tables])
         consumed = _absorb_labels(figures, page_blocks)
         page_blocks = [b for b in page_blocks if id(b) not in consumed]
         if assets:
@@ -347,6 +347,15 @@ def _area(b: tuple) -> float:
 
 def _intersect_area(a: tuple, b: tuple) -> float:
     return _area((max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])))
+
+
+def _cluster_gap(page_blocks: list[dict], default: float = 14.0) -> float:
+    """A dense two-column page needs a tighter gap or two adjacent plots merge into one crop."""
+    sizes = [b["size"] for b in page_blocks if b["kind"] == "text" and b["size"] > 0]
+    if not sizes:
+        return default
+    line_height = sorted(sizes)[len(sizes) // 2] * 1.2
+    return max(4.0, min(default, line_height))
 
 
 def _cluster_regions(images: list[dict], gap: float = 14.0) -> list[dict]:

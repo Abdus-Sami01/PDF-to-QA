@@ -14,6 +14,7 @@ from pathlib import Path
 from .llm import Runtime, parse_json
 from .llm import LLMError
 from .prompts import CLARIFY_CHECK, FIGURE_GROUND, NLI_FORWARD, NLI_REVERSE, SYMBOLIC_CHECK, Z3_CHECK
+from .tools import execute, observations_agree
 from .records import QARecord
 
 WORD = re.compile(r"[A-Za-z0-9_.%-]+")
@@ -178,6 +179,68 @@ def visual_grounding(runtime: Runtime, rec: QARecord) -> Gate:
     return Gate("visual_grounding", label == "entailment", conf if label == "entailment" else 0.0, f"{label} conf={conf:.2f}")
 
 
+def trace_execution(rec: QARecord, timeout: float = 10.0, allow_exec: bool = True) -> Gate:
+    """Replays every action in a ReAct trace and compares the real result to the claimed one."""
+    if not rec.tool_trace:
+        return Gate("trace_execution", True, 1.0, "no trace")
+    if not allow_exec:
+        return Gate("trace_execution", True, 0.5, "execution disabled")
+
+    grids = rec.tool_env.get("grids") or []
+    checked, agreed, notes = 0, 0, []
+    for i, step in enumerate(rec.tool_trace):
+        action = str(step.get("action", "")).strip().lower()
+        if action not in ("python", "sql", "lookup"):
+            notes.append(f"step {i}: unknown tool {action!r}")
+            continue
+        result = execute(action, str(step.get("action_input", "")), rec.context, grids, timeout)
+        checked += 1
+        step["executed_observation"] = result.output[:600]
+        step["executed_ok"] = result.ok
+        if not result.ok:
+            notes.append(f"step {i} ({action}) failed: {result.output[:120]}")
+            continue
+        if observations_agree(str(step.get("observation", "")), result.output):
+            agreed += 1
+        else:
+            notes.append(f"step {i} ({action}) claimed {str(step.get('observation', ''))[:60]!r}, got {result.output[:60]!r}")
+
+    if not checked:
+        return Gate("trace_execution", False, 0.0, "; ".join(notes) or "no runnable steps")
+    score = agreed / checked
+    return Gate("trace_execution", agreed == checked, score, "; ".join(notes) or f"{agreed}/{checked} observations reproduced")
+
+
+def turn_coherence(rec: QARecord, min_overlap: float = 0.12) -> Gate:
+    """Dialogue-shaped checks: alternation, no empty turns, no assistant turn adrift from the source."""
+    turns = rec.turns
+    if not turns:
+        return Gate("turn_coherence", True, 1.0, "not a dialogue")
+    issues = []
+    if turns[0].role != "user":
+        issues.append("does not open with a user turn")
+    for i, t in enumerate(turns):
+        if not t.content.strip():
+            issues.append(f"turn {i} is empty")
+        if i and t.role == turns[i - 1].role:
+            issues.append(f"turn {i} repeats role {t.role}")
+
+    ctx = set(tokens(rec.context))
+    assistant = [t for t in turns if t.role == "assistant"]
+    if not assistant:
+        issues.append("no assistant turn")
+    drifting = 0
+    for t in assistant:
+        ans = set(tokens(t.content))
+        if ans and len(ans & ctx) / len(ans) < min_overlap:
+            drifting += 1
+    if assistant and drifting > len(assistant) / 2:
+        issues.append(f"{drifting}/{len(assistant)} assistant turns unrelated to the source")
+
+    score = 0.0 if issues else 1.0 - (drifting / max(1, len(assistant))) * 0.5
+    return Gate("turn_coherence", not issues, score, "; ".join(issues) or f"{len(turns)} turns, {drifting} drifting")
+
+
 # --------------------------------------------------------------------------- symbolic
 
 
@@ -290,6 +353,10 @@ def verify(
     """Figure-derived rows swap text grounding for visual grounding — their numbers are read off axes."""
     visual = rec.task == "figure_qa" and bool(rec.images)
     gates: list[Gate] = [g(rec) for g in (VISUAL_CHEAP_GATES if visual else CHEAP_GATES)]
+    if rec.turns:
+        gates.append(turn_coherence(rec))
+    if rec.tool_trace:
+        gates.append(trace_execution(rec, allow_exec=allow_exec))
     if use_model_gates and runtime is not None and all(g.passed for g in gates):
         if visual:
             gates.append(visual_grounding(runtime, rec))
@@ -321,6 +388,8 @@ def quality_score(rec: QARecord, gates: list[Gate]) -> float:
         "symbolic": 2.0,
         "z3": 2.0,
         "visual_grounding": 3.0,
+        "trace_execution": 3.0,
+        "turn_coherence": 2.0,
         "self_consistency": 1.5,
         "numeric_grounding": 1.5,
         "lexical_grounding": 1.0,

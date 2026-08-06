@@ -50,9 +50,10 @@ def as_react(rec: QARecord) -> dict:
                 "action": step.get("action", ""),
                 "action_input": step.get("action_input", ""),
                 "observation": step.get("observation", ""),
+                "verified": bool(step.get("executed_ok")),
             }
         )
-    return {"question": rec.question, "trace": steps, "answer": rec.answer}
+    return {"question": rec.question, "trace": steps, "answer": rec.answer, "tables": rec.tool_env.get("grids", [])}
 
 
 def as_multimodal(rec: QARecord) -> dict:

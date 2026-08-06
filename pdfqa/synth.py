@@ -21,6 +21,7 @@ from .prompts import (
     STYLES,
 )
 from .records import Chunk, Provenance, QARecord, Turn
+from .tools import execute, observations_agree
 
 
 def _prov(chunk: Chunk, generator: str) -> Provenance:
@@ -146,8 +147,35 @@ def generate_react(runtime: Runtime, chunk: Chunk) -> QARecord | None:
         task="react",
         difficulty="complex",
         tool_trace=trace,
+        tool_env={"grids": chunk.grids},
         prov=_prov(chunk, "generate_react"),
     )
+
+
+def repair_trace(rec: QARecord, timeout: float = 10.0) -> QARecord:
+    """Replace claimed observations with what the tools actually returned, so the trace is true by construction.
+
+    Steps whose tool errored are left alone — a broken action is a real defect and the gate should catch it.
+    """
+    if not rec.tool_trace:
+        return rec
+    grids = rec.tool_env.get("grids") or []
+    repaired = 0
+    for step in rec.tool_trace:
+        action = str(step.get("action", "")).strip().lower()
+        if action not in ("python", "sql", "lookup"):
+            continue
+        result = execute(action, str(step.get("action_input", "")), rec.context, grids, timeout)
+        if not result.ok:
+            continue
+        claimed = str(step.get("observation", ""))
+        if not observations_agree(claimed, result.output):
+            step["observation_claimed"] = claimed
+            step["observation"] = result.output[:600]
+            repaired += 1
+    if repaired:
+        rec.prov.verification.append({"stage": "trace_repair", "steps_repaired": repaired})
+    return rec
 
 
 def generate_figure_qa(runtime: Runtime, chunk: Chunk, n: int = 2) -> list[QARecord]:

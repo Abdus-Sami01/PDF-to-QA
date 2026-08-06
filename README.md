@@ -46,13 +46,22 @@ sections — so answering genuinely requires combining two places in the paper.
 | `multihop` | Questions requiring two disjoint sections, sampled via KG paths |
 | `multiturn` | Dialogue trees with follow-ups, clarification, and corrected user misassumptions |
 | `figure_qa` | Multimodal pairs — the rendered figure crop is sent to a vision model with its caption and section text |
-| `react` | Tool-calling traces (python / sql / lookup) with real observations |
+| `react` | Tool-calling traces whose observations are actually executed, not asserted |
 | DPO pairs | Chosen answer plus a mutated rejected one — number hallucination, unit mismatch, off-by-one, causal inversion, and five more |
 
 Plus persona conditioning (domain expert, stakeholder, student, skeptical reviewer, ...), output
 style conditioning (prose, bullets, JSON, step-by-step, proof), and an Evol-Instruct engine that
 mutates questions to be harder — added constraints, counterfactuals, extra math steps, or
 implicit phrasing.
+
+**Tool traces are executed, not trusted.** A model asked to write a ReAct trace will happily invent
+the observation it wishes it had got. So every action gets replayed: `python` runs in the sandbox,
+`sql` runs against a real in-memory SQLite table built from the extracted table grid (header row
+becomes sanitised columns, cells get typed so `max(accuracy) - min(accuracy)` actually works,
+read-only queries only), and `lookup` searches the source. Claimed observations are compared to the
+real ones with numeric tolerance. Mismatches get **repaired** — the real output replaces the invented
+one and the original is kept in provenance — and steps whose tool genuinely errored are left alone
+so the gate still rejects them.
 
 **Everything gets gated.** Rows pass through cheap deterministic checks first, then model checks:
 
@@ -64,6 +73,8 @@ implicit phrasing.
   subprocess
 - *Z3* — the same claim is encoded as SMT-LIB constraints; it passes only if the constraints are
   satisfiable **and** their negation is unsatisfiable, which is entailment rather than mere consistency
+- *Trace execution* — every tool call in a ReAct trace re-run and compared
+- *Turn coherence* — dialogues checked for alternation, empty turns, and assistant turns that drift off source
 - *Self-consistency* — optional re-answer voting
 
 Figure-derived rows take a different route: text grounding would falsely reject numbers read off
@@ -112,12 +123,14 @@ pdfqa run docs/ --no-figures        # skip rendering and multimodal synthesis en
 
 ## Incremental
 
-Every stage is content-addressed. Change a prompt and only synthesis re-runs; change the parser
-and only extraction re-runs. Adding a PDF to a directory of 500 doesn't reprocess the other 499.
+Every stage is content-addressed, including synthesis — the expensive one. Change a prompt and only
+synthesis re-runs; change the parser and only extraction re-runs. Adding a PDF to a directory of 500
+doesn't reprocess the other 499, and a run that dies halfway resumes from the documents it finished
+instead of paying for them twice.
 
 ```bash
 pdfqa cache            # what's stored
-pdfqa cache --clear --stage graph
+pdfqa cache --clear --stage synth
 ```
 
 ## Commands

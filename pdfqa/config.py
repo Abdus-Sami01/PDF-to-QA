@@ -6,8 +6,8 @@ import json
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 
-PARSER_VERSION = "3"
-PROMPT_VERSION = "3"
+PARSER_VERSION = "4"
+PROMPT_VERSION = "4"
 
 
 @dataclass
@@ -34,6 +34,7 @@ class SynthConfig:
     multiturn_per_doc: int = 4
     multiturn_length: int = 6
     react_per_doc: int = 3
+    repair_traces: bool = True
     persona_ratio: float = 0.3
     evol_ratio: float = 0.25
     dpo_ratio: float = 0.4

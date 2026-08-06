@@ -170,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ca = sub.add_parser("cache", help="inspect or clear the incremental cache")
     ca.add_argument("--dir", default=".pdfqa-cache")
-    ca.add_argument("--stage", help="ast, chunks, or graph")
+    ca.add_argument("--stage", help="ast, chunks, graph, or synth")
     ca.add_argument("--clear", action="store_true")
     ca.set_defaults(func=cmd_cache)
 
