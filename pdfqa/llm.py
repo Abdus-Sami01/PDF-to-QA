@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from array import array
 import json
 import os
 import re
@@ -234,16 +235,16 @@ class Echo(Backend):
         return self.complete(f"{prompt}\n\n[images: {tag}]", system, temperature, max_tokens)
 
 
-def hashed_embedding(text: str, dim: int = 256) -> list[float]:
+def hashed_embedding(text: str, dim: int = 256) -> array:
     """Deterministic bag-of-ngrams hashing embedding; no model download, decent for dedup."""
-    vec = [0.0] * dim
+    vec = array("f", bytes(4 * dim))
     tokens = re.findall(r"[a-z0-9]+", text.lower())
     grams = tokens + [f"{a}_{b}" for a, b in zip(tokens, tokens[1:])]
     for g in grams:
         h = int.from_bytes(hashlib.blake2b(g.encode("utf-8"), digest_size=8).digest(), "little")
         vec[h % dim] += 1.0
     norm = sum(v * v for v in vec) ** 0.5 or 1.0
-    return [v / norm for v in vec]
+    return array("f", (v / norm for v in vec))
 
 
 BACKENDS = {"openai": OpenAICompatible, "vllm": OpenAICompatible, "anthropic": Anthropic, "ollama": Ollama, "echo": Echo}

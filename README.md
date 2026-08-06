@@ -118,6 +118,12 @@ Semantic dedup is exact all-pairs on small runs and switches to random-projectio
 records with identical output, and the gap widens from there. Below the crossover the projection
 overhead costs more than it saves, so it stays exact.
 
+Embeddings are held as packed float32 arrays rather than Python lists. Measured at 1536 dimensions
+that is 6.6 KB per vector instead of 49 KB — a 7.5× difference, and the thing that decides whether
+a large corpus fits in RAM at all (200k records: ~1.3 GB instead of ~9.9 GB). The cost is float32
+precision, about 1e-7 per component, which is five orders of magnitude below the 0.92 cosine
+threshold it feeds.
+
 **Provenance survives to the export.** Every row carries source file, page indexes, bounding boxes,
 AST node ids, section breadcrumb, and the full pass/fail log of every gate it went through.
 

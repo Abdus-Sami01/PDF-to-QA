@@ -7,6 +7,7 @@ import json
 import math
 import random
 import re
+from array import array
 from collections import defaultdict
 from pathlib import Path
 
@@ -167,21 +168,29 @@ def dedup_against(records: list[QARecord], reference_questions: list[str], thres
 # --------------------------------------------------------------------------- dense space
 
 
-def cosine(a: list[float], b: list[float]) -> float:
+Vector = array
+
+
+def cosine(a: Vector, b: Vector) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
-def embed_records(runtime: Runtime, records: list[QARecord], batch: int = 64) -> list[list[float]]:
-    vectors: list[list[float]] = []
+def embed_records(runtime: Runtime, records: list[QARecord], batch: int = 64) -> list[Vector]:
+    vectors: list[Vector] = []
     for i in range(0, len(records), batch):
         chunk = [f"{r.question}\n{r.answer[:500]}" for r in records[i : i + batch]]
-        vectors.extend(runtime.embed(chunk))
-    return [normalize(v) for v in vectors]
+        vectors.extend(normalize(v) for v in runtime.embed(chunk))
+    return vectors
 
 
-def normalize(v: list[float]) -> list[float]:
-    n = math.sqrt(sum(x * x for x in v)) or 1.0
-    return [x / n for x in v]
+def normalize(v) -> Vector:
+    """Returns a float array, not a list: at 1536 dimensions that is 7.5x less memory per vector,
+    which is what decides whether a large corpus fits in RAM at all."""
+    total = 0.0
+    for x in v:
+        total += x * x
+    n = math.sqrt(total) or 1.0
+    return array("f", (x / n for x in v))
 
 
 class HyperplaneIndex:
@@ -193,10 +202,10 @@ class HyperplaneIndex:
 
     def __init__(self, dim: int, tables: int = 8, bits: int = 8, seed: int = 13):
         rng = random.Random(seed)
-        self.planes = [[[rng.gauss(0.0, 1.0) for _ in range(dim)] for _ in range(bits)] for _ in range(tables)]
+        self.planes = [[array("f", (rng.gauss(0.0, 1.0) for _ in range(dim))) for _ in range(bits)] for _ in range(tables)]
         self.buckets: list[dict[int, list[int]]] = [defaultdict(list) for _ in range(tables)]
 
-    def signature(self, vec: list[float]) -> list[int]:
+    def signature(self, vec: Vector) -> list[int]:
         out = []
         for table in self.planes:
             bits = 0
@@ -206,11 +215,11 @@ class HyperplaneIndex:
             out.append(bits)
         return out
 
-    def add(self, idx: int, vec: list[float]) -> None:
+    def add(self, idx: int, vec: Vector) -> None:
         for table, sig in zip(self.buckets, self.signature(vec)):
             table[sig].append(idx)
 
-    def candidates(self, vec: list[float]) -> set[int]:
+    def candidates(self, vec: Vector) -> set[int]:
         out: set[int] = set()
         for table, sig in zip(self.buckets, self.signature(vec)):
             out.update(table.get(sig, ()))
@@ -220,7 +229,7 @@ class HyperplaneIndex:
 EXACT_LIMIT = 2000
 
 
-def dedup_semantic(records: list[QARecord], vectors: list[list[float]], threshold: float = 0.92) -> tuple[list[QARecord], list[QARecord]]:
+def dedup_semantic(records: list[QARecord], vectors: list[Vector], threshold: float = 0.92) -> tuple[list[QARecord], list[QARecord]]:
     """k-center greedy: keep points that are far from everything already kept.
 
     Exact all-pairs below EXACT_LIMIT records, bucketed above it — the exact path is quadratic and
@@ -243,7 +252,7 @@ def dedup_semantic(records: list[QARecord], vectors: list[list[float]], threshol
     return [records[i] for i in kept_idx], dropped
 
 
-def dpp_select(records: list[QARecord], vectors: list[list[float]], budget_tokens: int | None = None, k: int | None = None, quality_weight: float = 1.0) -> list[QARecord]:
+def dpp_select(records: list[QARecord], vectors: list[Vector], budget_tokens: int | None = None, k: int | None = None, quality_weight: float = 1.0) -> list[QARecord]:
     """Greedy submodular selection maximising quality plus marginal coverage (MAP-style DPP)."""
     if not records:
         return []

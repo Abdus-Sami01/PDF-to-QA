@@ -23,6 +23,22 @@ def make(n, dim=64, clusters=None, seed=5):
     return records, vectors
 
 
+def test_embedding_memory_stays_close_to_four_bytes_per_dimension():
+    """Vectors dominate memory at corpus scale — list[float] is ~32 bytes per dimension."""
+    import tracemalloc
+    from pdfqa.select import normalize
+
+    rng = random.Random(3)
+    n, dim = 300, 1536
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    vectors = [normalize([rng.random() for _ in range(dim)]) for _ in range(n)]
+    used = tracemalloc.get_traced_memory()[0] - base
+    tracemalloc.stop()
+    assert len(vectors) == n
+    assert used / (n * dim) < 8.0
+
+
 def test_context_is_shared_between_records_from_one_chunk(tree, runtime):
     chunk = chunk_tree(tree, max_tokens=300)[0]
     records = generate_qa(runtime, chunk, n=3)
@@ -91,4 +107,30 @@ def test_dpp_respects_a_token_budget():
 def test_hashed_embeddings_are_stable_across_calls():
     a, b = hashed_embedding("routing accuracy"), hashed_embedding("routing accuracy")
     assert a == b
-    assert abs(sum(x * x for x in a) - 1.0) < 1e-9
+    assert abs(sum(x * x for x in a) - 1.0) < 1e-6
+
+
+def test_vectors_are_float_arrays_not_lists():
+    from array import array
+
+    v = hashed_embedding("routing accuracy")
+    assert isinstance(v, array) and v.typecode == "f"
+    assert isinstance(normalize([3.0, 4.0]), array)
+
+
+def test_float32_precision_is_far_below_the_dedup_thresholds():
+    """The memory win costs ~1e-7 per component; the tightest threshold in use is 0.92."""
+    import math
+    import random
+
+    rng = random.Random(11)
+    raw_a = [rng.gauss(0, 1) for _ in range(1536)]
+    raw_b = [x + rng.gauss(0, 0.05) for x in raw_a]
+
+    def exact(v):
+        n = math.sqrt(sum(x * x for x in v))
+        return [x / n for x in v]
+
+    exact_cos = sum(x * y for x, y in zip(exact(raw_a), exact(raw_b)))
+    packed_cos = cosine(normalize(raw_a), normalize(raw_b))
+    assert abs(exact_cos - packed_cos) < 1e-5
