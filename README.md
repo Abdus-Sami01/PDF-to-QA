@@ -182,6 +182,55 @@ the report rather than quietly leaking:
            "note": "fewer than 3 source documents; split row-wise, so contexts overlap across splits"}
 ```
 
+## Knowing the cost first
+
+Verification is by far the most expensive stage, and that isn't obvious until you're billed for it.
+`plan` parses and chunks for real — both free — then projects everything past that from your config
+and actual chunk sizes:
+
+```bash
+pdfqa plan papers/ --price-in 3 --price-out 15
+```
+
+```
+stage           role         calls    prompt tok    output tok
+qa              generate        10         4,792         7,800
+multihop        generate        16         8,928         5,120
+dpo             generate        36        17,244         8,640
+verify          verify         450       215,550        90,000
+total                          566       272,854       132,020
+
+estimated cost at $3.0/M in, $15.0/M out: $2.80
+```
+
+450 of 566 calls are verification. That's the knob to turn if a run is too expensive — drop
+`verify.z3` or `verify.symbolic` and re-plan before committing. Prices are yours to supply rather
+than baked in, since published rates change and a stale table would be worse than none.
+
+## Extending it without forking
+
+Three registration points, all additive — built-ins keep working whether or not anything is
+registered:
+
+```python
+from pdfqa import register_task, register_format, register_adapter
+
+@register_task("definition")
+def definitions(runtime, chunks, kg, config):
+    return [...]           # extra QARecords, generated however you like
+
+@register_format("minimal")
+def minimal(records):
+    return [{"q": r.question, "a": r.answer} for r in records]
+
+@register_adapter(".log")
+def read_log(path):
+    return ...             # a DocumentTree; inherits chunking, graph, verification, export
+```
+
+Point `plugins` in the config (or `--config`) at the module or file path and the pipeline loads it.
+A registered adapter joins directory expansion, so `.log` files get picked up alongside PDFs.
+
 ## Querying the corpus
 
 Because the corpus is exported, it can be searched — hybrid BM25 plus embeddings, answered with
@@ -271,6 +320,7 @@ pdfqa cache --clear --stage synth
 ## Commands
 
 ```bash
+pdfqa plan <inputs>      # estimate calls, tokens and cost before spending anything
 pdfqa run <inputs>       # full pipeline (pdf, md, html, docx, epub, tex, ipynb, csv)
 pdfqa inspect <file>     # AST outline, resolved references, rendered images, chunk plan
 pdfqa graph <file>       # knowledge graph stats and multi-hop seed pairs

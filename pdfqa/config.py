@@ -42,6 +42,7 @@ class SynthConfig:
     personas: list[str] = field(default_factory=lambda: ["domain_expert", "non_technical_stakeholder", "student", "skeptical_reviewer", "practitioner"])
     styles: list[str] = field(default_factory=lambda: ["prose", "bullets", "json", "step_by_step"])
     temperature: float = 0.8
+    tasks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -84,6 +85,7 @@ class Config:
     formats: list[str] = field(default_factory=lambda: ["chatml", "sharegpt", "dpo", "raw"])
     cache_dir: str = ".pdfqa-cache"
     cache: bool = True
+    plugins: list[str] = field(default_factory=list)
     assets_dir: str | None = "assets"
     corpus: bool = True
     split: list[float] = field(default_factory=list)

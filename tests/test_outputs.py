@@ -135,10 +135,10 @@ def test_a_single_run_handles_six_formats_at_once(config, tmp_path):
 
 
 def test_directory_expansion_picks_up_every_supported_suffix(tmp_path):
-    from pdfqa.pipeline import SUPPORTED, _expand
+    from pdfqa.pipeline import _expand, supported
 
     build_all(tmp_path / "docs")
     (tmp_path / "docs" / "ignored.rtf").write_text("no")
     found = _expand([str(tmp_path / "docs")])
-    assert found and all(p.suffix.lower() in SUPPORTED for p in found)
+    assert found and all(p.suffix.lower() in supported() for p in found)
     assert not any(p.suffix == ".rtf" for p in found)

@@ -6,6 +6,7 @@ import json
 import random
 from pathlib import Path
 
+from . import registry
 from .records import Chunk, QARecord
 
 DEFAULT_SYSTEM = "You answer questions strictly from the provided source material."
@@ -95,7 +96,11 @@ def export(records: list[QARecord], outdir: str | Path, formats: list[str] | Non
 
     for fmt in formats:
         if fmt not in FORMATS:
-            raise ValueError(f"unknown format {fmt!r}; choose from {FORMATS}")
+            custom = registry.FORMATS.get(fmt)
+            if custom is None:
+                raise ValueError(f"unknown format {fmt!r}; choose from {sorted(set(FORMATS) | set(registry.FORMATS))}")
+            written[fmt] = str(_write_jsonl(out / f"{fmt}.jsonl", list(custom(records))))
+            continue
         if fmt in ("chatml", "openai", "unsloth"):
             rows = [as_chatml(r, system) for r in records]
         elif fmt in ("sharegpt", "llamafactory"):

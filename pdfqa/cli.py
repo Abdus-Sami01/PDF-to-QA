@@ -1,4 +1,4 @@
-"""Command line entry point: `pdfqa run`, `inspect`, `graph`, `ask`, `eval`, `report`, `cache`, `init`."""
+"""Command line entry point: `pdfqa plan`, `run`, `inspect`, `graph`, `ask`, `eval`, `report`, `cache`, `init`."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ from .evaluate import evaluate
 from .extract import load
 from .graph import build_graph, dump
 from .llm import Runtime
-from .pipeline import Pipeline
+from .pipeline import Pipeline, _expand
+from .plan import collect_chunks, estimate, format_plan
 from .retrieve import Index, answer
 from .select import distribution_report
 
@@ -140,6 +141,20 @@ def cmd_report(args) -> int:
     print("\nper source:")
     for src, n in list(summary["sources"].items())[:20]:
         print(f"  {n:>6}  {src}")
+    return 0
+
+
+def cmd_plan(args) -> int:
+    cfg = _config(args)
+    paths = _expand(list(args.inputs or cfg.inputs))
+    if not paths:
+        print("no inputs given", file=sys.stderr)
+        return 1
+    estimated = estimate(cfg, collect_chunks(cfg, paths))
+    if args.json:
+        print(json.dumps(estimated.as_dict(args.price_in, args.price_out), indent=2))
+        return 0
+    print(format_plan(estimated, args.price_in, args.price_out))
     return 0
 
 
@@ -271,6 +286,15 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("path", help="output directory or a raw.jsonl file")
     rp.add_argument("--json", action="store_true")
     rp.set_defaults(func=cmd_report)
+
+    pl = sub.add_parser("plan", help="estimate calls, tokens and cost without contacting a model")
+    pl.add_argument("inputs", nargs="*")
+    pl.add_argument("-c", "--config")
+    pl.add_argument("--backend")
+    pl.add_argument("--price-in", type=float, default=0.0, help="input price per million tokens")
+    pl.add_argument("--price-out", type=float, default=0.0, help="output price per million tokens")
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(func=cmd_plan, out=None)
 
     ask = sub.add_parser("ask", help="answer a question from an exported corpus, with citations")
     ask.add_argument("question")

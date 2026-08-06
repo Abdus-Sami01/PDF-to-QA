@@ -7,8 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import export as exporters
 from . import extract, synth, verify as verifier
+from . import registry
+from .export import export as export_dataset, split_is_document_wise, split_records, write_corpus, write_dataset_card
 from .adapters import SUFFIXES as ADAPTER_SUFFIXES
 from .cache import Store, file_fingerprint, fingerprint
 from .chunking import chunk_tree
@@ -29,7 +30,11 @@ from .select import (
     load_questions,
 )
 
-SUPPORTED = {".pdf", ".md", ".markdown", ".txt"} | set(ADAPTER_SUFFIXES)
+BUILTIN_SUFFIXES = {".pdf", ".md", ".markdown", ".txt"} | set(ADAPTER_SUFFIXES)
+
+
+def supported() -> set[str]:
+    return BUILTIN_SUFFIXES | set(registry.ADAPTERS)
 
 Progress = Callable[[str, dict], None]
 
@@ -46,6 +51,9 @@ class Pipeline:
         self.rng = random.Random(config.seed)
         self.progress = progress or _noop
         self.report: dict = {"documents": [], "stages": {}}
+        if config.plugins:
+            self.report["plugins"] = registry.load_plugins(config.plugins)
+            self.report["registered"] = registry.summary()
 
     # ---------------------------------------------------------------- stages
 
@@ -125,8 +133,23 @@ class Pipeline:
             records.extend(traces)
             self.progress("synth.react", {"records": len(traces), "repaired": sum(1 for t in traces if any(v.get("stage") == "trace_repair" for v in t.prov.verification))})
 
+        records.extend(self._custom_tasks(chunks, kg))
         records.extend(self._augment(records))
         return records
+
+    def _custom_tasks(self, chunks: list[Chunk], kg: KnowledgeGraph) -> list[QARecord]:
+        wanted = self.cfg.synth.tasks or list(registry.TASKS)
+        out: list[QARecord] = []
+        for name in wanted:
+            fn = registry.TASKS.get(name)
+            if fn is None:
+                raise ValueError(f"unknown task {name!r}; registered: {sorted(registry.TASKS)}")
+            produced = [r for r in (fn(self.runtime, chunks, kg, self.cfg) or []) if isinstance(r, QARecord)]
+            for rec in produced:
+                rec.task = rec.task if rec.task != "qa" else name
+            out.extend(produced)
+            self.progress(f"synth.{name}", {"records": len(produced)})
+        return out
 
     def synthesize_cached(self, tree: DocumentTree, chunks: list[Chunk], kg: KnowledgeGraph) -> list[QARecord]:
         """Synthesis is the expensive stage; checkpoint it per document so a crashed run resumes."""
@@ -243,15 +266,15 @@ class Pipeline:
         kept = self.select(kept)
 
         out = Path(self.cfg.outdir)
-        written = exporters.export(kept, out, self.cfg.formats)
+        written = export_dataset(kept, out, self.cfg.formats)
         if self.cfg.corpus:
-            written["corpus"] = exporters.write_corpus(corpus_chunks, out / "corpus.jsonl")
+            written["corpus"] = write_corpus(corpus_chunks, out / "corpus.jsonl")
             self.progress("corpus", {"chunks": len(corpus_chunks)})
         if self.cfg.split:
             written |= self.write_splits(kept, out)
 
         stats = distribution_report(kept)
-        card = exporters.write_dataset_card(kept, stats, out / "DATASET_CARD.md")
+        card = write_dataset_card(kept, stats, out / "DATASET_CARD.md")
 
         self.report["stats"] = stats
         self.report["files"] = written | {"card": card}
@@ -261,12 +284,12 @@ class Pipeline:
         return self.report
 
     def write_splits(self, records: list[QARecord], out: Path) -> dict[str, str]:
-        splits = exporters.split_records(records, tuple(self.cfg.split), self.cfg.seed)
-        document_wise = exporters.split_is_document_wise(records)
+        splits = split_records(records, tuple(self.cfg.split), self.cfg.seed)
+        document_wise = split_is_document_wise(records)
         written: dict[str, str] = {}
         for name, subset in splits.items():
             if subset:
-                written |= {f"{name}/{k}": v for k, v in exporters.export(subset, out / name, self.cfg.formats).items()}
+                written |= {f"{name}/{k}": v for k, v in export_dataset(subset, out / name, self.cfg.formats).items()}
         self.report["splits"] = {
             "sizes": {k: len(v) for k, v in splits.items()},
             "document_wise": document_wise,
@@ -325,7 +348,7 @@ def _expand(paths: list[str]) -> list[Path]:
     for raw in paths:
         p = Path(raw)
         if p.is_dir():
-            out.extend(sorted(x for x in p.rglob("*") if x.suffix.lower() in SUPPORTED))
+            out.extend(sorted(x for x in p.rglob("*") if x.suffix.lower() in supported()))
         elif any(ch in raw for ch in "*?["):
             out.extend(sorted(Path().glob(raw)))
         else:

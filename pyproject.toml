@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdfqa"
-version = "0.9.0"
+version = "1.0.0"
 description = "Neuro-symbolic, graph-aware synthetic data engine: turns PDF, DOCX, HTML, LaTeX, EPUB and notebooks into verified fine-tuning datasets, retrieval corpora and eval splits"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Abdus Sami" }]
 keywords = ["synthetic-data", "fine-tuning", "pdf", "docx", "knowledge-graph", "dpo", "rag", "multimodal", "agent-traces", "llm"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3.10",
