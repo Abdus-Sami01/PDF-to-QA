@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -296,17 +297,25 @@ def z3_available() -> bool:
     return True
 
 
+_Z3_LOCK = threading.Lock()
+
+
 def z3_solve(constraints: str, timeout: float = 10.0) -> tuple[str, str]:
-    """Return (sat|unsat|unknown|error, detail) for an SMT-LIB 2 fragment."""
+    """Return (sat|unsat|unknown|error, detail) for an SMT-LIB 2 fragment.
+
+    Serialised: z3's parser shares global AST state, and calling it from several worker threads
+    aborts the whole process rather than raising.
+    """
     try:
         import z3  # type: ignore
     except ImportError:
         return "unknown", "z3 not installed"
     try:
-        solver = z3.Solver()
-        solver.set("timeout", int(timeout * 1000))
-        solver.from_string(constraints if "(check-sat)" not in constraints else constraints.replace("(check-sat)", ""))
-        return str(solver.check()), ""
+        with _Z3_LOCK:
+            solver = z3.Solver()
+            solver.set("timeout", int(timeout * 1000))
+            solver.from_string(constraints if "(check-sat)" not in constraints else constraints.replace("(check-sat)", ""))
+            return str(solver.check()), ""
     except Exception as exc:
         return "error", str(exc)[:300]
 

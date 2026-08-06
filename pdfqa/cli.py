@@ -31,6 +31,10 @@ def _config(args) -> Config:
         cfg.outdir = args.out
     if getattr(args, "formats", None):
         cfg.formats = args.formats
+    if getattr(args, "split", None):
+        cfg.split = list(args.split)
+    if getattr(args, "no_corpus", False):
+        cfg.corpus = False
     if getattr(args, "against", None):
         cfg.select.against = args.against
     if getattr(args, "no_cache", False):
@@ -168,7 +172,7 @@ def cmd_init(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="pdfqa", description="Neuro-symbolic PDF to fine-tuning dataset engine")
+    p = argparse.ArgumentParser(prog="pdfqa", description="Neuro-symbolic document to fine-tuning dataset engine")
     sub = p.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="run the full pipeline")
@@ -184,6 +188,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--vision-model")
     run.add_argument("--no-figures", action="store_true", help="skip figure rendering and multimodal synthesis")
     run.add_argument("--offline", action="store_true", help="skip all LLM-dependent gates and extraction")
+    run.add_argument("--split", nargs=3, type=float, metavar=("TRAIN", "VAL", "TEST"),
+                     help="also write train/validation/test subdirectories, grouped by source document")
+    run.add_argument("--no-corpus", action="store_true", help="skip the retrieval corpus export")
     run.add_argument("--against", nargs="+", help="drop questions that near-duplicate these earlier exports")
     run.add_argument("--no-cache", action="store_true")
     run.set_defaults(func=cmd_run)

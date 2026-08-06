@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 
-PARSER_VERSION = "5"
+PARSER_VERSION = "6"
 PROMPT_VERSION = "5"
 
 
@@ -85,6 +85,8 @@ class Config:
     cache_dir: str = ".pdfqa-cache"
     cache: bool = True
     assets_dir: str | None = "assets"
+    corpus: bool = True
+    split: list[float] = field(default_factory=list)
     figure_dpi: int = 144
     seed: int = 7
     backend: str = "auto"

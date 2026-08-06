@@ -1,11 +1,11 @@
 # PDF-to-QA
 
-Turns technical PDFs into verified fine-tuning datasets. It parses documents into a typed AST,
-builds a knowledge graph over them, generates SFT / DPO / multi-turn / ReAct data across that
-graph, then gates every row through grounding checks before export.
+Turns technical documents into verified fine-tuning datasets. It parses them into a typed AST,
+builds a knowledge graph over them, generates SFT / DPO / multi-turn / ReAct / multimodal data
+across that graph, then gates every row through grounding checks before export.
 
-Most PDF-to-dataset tools flatten the document to text, slide a window over it, and ask a model
-for questions. That loses tables, section structure, and cross-references, and it can only ever
+Most document-to-dataset tools flatten to text, slide a window over it, and ask a model for
+questions. That loses tables, section structure, and cross-references, and it can only ever
 produce single-paragraph lookup questions. This one keeps the structure and generates against it.
 
 ```bash
@@ -13,11 +13,22 @@ pip install -e ".[all]"
 pdfqa run papers/ --backend ollama --model qwen2.5:7b -o dataset/
 ```
 
+**Inputs:** PDF, Markdown, plain text, HTML, DOCX, EPUB, LaTeX source, Jupyter notebooks, CSV/TSV.
+Point it at a directory and it takes whatever it recognises — one run can span six formats. Only
+PDF needs a third-party parser; every other adapter is standard library (DOCX and EPUB are zip
+archives of XML, notebooks are JSON).
+
+**Outputs:** a fine-tuning dataset in ten formats, a retrieval corpus, and leak-free train/val/test
+splits — from the same pass over the documents.
+
 ## What it does
 
-**Structure, not flat text.** PDFs parse into a typed AST — headings, tables, equations,
+**Structure, not flat text.** Documents parse into a typed AST — headings, tables, equations,
 captions, footnotes — with parent/child/sibling links intact. Tables come out as HTML plus a cell
-grid. Every node carries its page index and bounding box.
+grid. PDF nodes carry page index and bounding box. Every downstream stage works on the AST, so
+each new input format inherits the entire pipeline: DOCX heading styles, HTML `<h2>`, and LaTeX
+`\subsection` all become the same node type, and a `<table>`, a `w:tbl` and a `tabular` all become
+the same queryable grid.
 
 **Equations are parsed, not just stored.** LaTeX goes through a real tokeniser and parser into a
 syntax tree, so a dropped superscript, an unclosed brace, a `\frac` missing an argument, or a
@@ -148,6 +159,28 @@ pdfqa run docs/ -f chatml dpo multimodal --limit 2000 --vision anthropic
 pdfqa run docs/ --no-figures        # skip rendering and multimodal synthesis entirely
 ```
 
+## More than one thing out of one run
+
+The chunk set is already a retrieval corpus — breadcrumbed, provenanced, table-aware — so it gets
+written out as `corpus.jsonl` next to the dataset. Same pass, no extra model calls. That gives you
+the index to evaluate a model against and the data to train it with, built from identical parsing,
+so retrieval failures can't be blamed on a different chunker.
+
+```bash
+pdfqa run papers/ -o dataset/ --split 0.8 0.1 0.1
+```
+
+Splits move **whole documents**, never rows. Rows from one paper share context passages and
+entities, so a row-wise split puts the eval answer in the training set. With fewer than three
+source documents there's nothing to split document-wise, so it falls back to rows and says so in
+the report rather than quietly leaking:
+
+```json
+"splits": {"sizes": {"train": 3, "validation": 1, "test": 2},
+           "document_wise": false,
+           "note": "fewer than 3 source documents; split row-wise, so contexts overlap across splits"}
+```
+
 ## Auditing what came out
 
 ```bash
@@ -197,7 +230,7 @@ pdfqa cache --clear --stage synth
 ## Commands
 
 ```bash
-pdfqa run <inputs>       # full pipeline
+pdfqa run <inputs>       # full pipeline (pdf, md, html, docx, epub, tex, ipynb, csv)
 pdfqa inspect <file>     # AST outline, resolved references, rendered images, chunk plan
 pdfqa graph <file>       # knowledge graph stats and multi-hop seed pairs
 pdfqa report <dir>       # audit a produced dataset

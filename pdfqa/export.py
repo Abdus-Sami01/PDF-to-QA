@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
-from .records import QARecord
+from .records import Chunk, QARecord
 
 DEFAULT_SYSTEM = "You answer questions strictly from the provided source material."
 
@@ -154,6 +155,78 @@ def write_parquet(records: list[QARecord], path: str | Path) -> str | None:
     )
     pq.write_table(table, path)
     return str(path)
+
+
+def write_corpus(chunks: list[Chunk], path: str | Path) -> str:
+    """The chunk set is already a retrieval corpus — breadcrumbed, provenanced, table-aware.
+
+    Exporting it means one run yields both training data and the index you would evaluate against.
+    """
+    rows = []
+    for c in chunks:
+        rows.append(
+            {
+                "id": c.id,
+                "text": c.context(),
+                "body": c.text,
+                "breadcrumb": c.prov.breadcrumb,
+                "section_path": c.prov.section_path,
+                "source": c.prov.source,
+                "pages": c.prov.pages,
+                "node_ids": c.prov.node_ids,
+                "tokens": c.tokens,
+                "tables": c.tables,
+                "equations": c.equations,
+                "images": [f["image_path"] for f in c.figure_refs if f.get("image_path")],
+            }
+        )
+    return str(_write_jsonl(Path(path), rows))
+
+
+def split_records(records: list[QARecord], ratios: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 7) -> dict[str, list[QARecord]]:
+    """Split by source document, not by row.
+
+    Rows from one paper share context and entities, so a row-wise split leaks the eval set into
+    training. Whole documents move together instead.
+    """
+    if not records:
+        return {"train": [], "validation": [], "test": []}
+    by_source: dict[str, list[QARecord]] = {}
+    for rec in records:
+        by_source.setdefault(rec.prov.source or "unknown", []).append(rec)
+
+    sources = sorted(by_source, key=lambda s: (-len(by_source[s]), s))
+    random.Random(seed).shuffle(sources)
+    total = len(records)
+    targets = [ratios[0] * total, ratios[1] * total, ratios[2] * total]
+    names = ["train", "validation", "test"]
+    out: dict[str, list[QARecord]] = {n: [] for n in names}
+
+    if len(sources) < 3:
+        return _split_rows(records, ratios, seed)
+
+    for src in sources:
+        deficits = [targets[i] - len(out[names[i]]) for i in range(3)]
+        pick = deficits.index(max(deficits))
+        out[names[pick]].extend(by_source[src])
+    return out
+
+
+def _split_rows(records: list[QARecord], ratios: tuple[float, float, float], seed: int) -> dict[str, list[QARecord]]:
+    """Fallback for corpora too small to split by document; the leakage caveat is reported."""
+    shuffled = list(records)
+    random.Random(seed).shuffle(shuffled)
+    n_train = int(len(shuffled) * ratios[0])
+    n_val = int(len(shuffled) * ratios[1])
+    return {
+        "train": shuffled[:n_train],
+        "validation": shuffled[n_train : n_train + n_val],
+        "test": shuffled[n_train + n_val :],
+    }
+
+
+def split_is_document_wise(records: list[QARecord]) -> bool:
+    return len({r.prov.source for r in records}) >= 3
 
 
 def load_records(path: str | Path) -> list[QARecord]:

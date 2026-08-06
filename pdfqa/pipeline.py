@@ -9,6 +9,7 @@ from typing import Callable, Iterable
 
 from . import export as exporters
 from . import extract, synth, verify as verifier
+from .adapters import SUFFIXES as ADAPTER_SUFFIXES
 from .cache import Store, file_fingerprint, fingerprint
 from .chunking import chunk_tree
 from .config import PARSER_VERSION, PROMPT_VERSION, Config
@@ -27,6 +28,8 @@ from .select import (
     embed_records,
     load_questions,
 )
+
+SUPPORTED = {".pdf", ".md", ".markdown", ".txt"} | set(ADAPTER_SUFFIXES)
 
 Progress = Callable[[str, dict], None]
 
@@ -239,9 +242,16 @@ class Pipeline:
         kept = self.verify(all_records)
         kept = self.select(kept)
 
-        written = exporters.export(kept, self.cfg.outdir, self.cfg.formats)
+        out = Path(self.cfg.outdir)
+        written = exporters.export(kept, out, self.cfg.formats)
+        if self.cfg.corpus:
+            written["corpus"] = exporters.write_corpus(corpus_chunks, out / "corpus.jsonl")
+            self.progress("corpus", {"chunks": len(corpus_chunks)})
+        if self.cfg.split:
+            written |= self.write_splits(kept, out)
+
         stats = distribution_report(kept)
-        card = exporters.write_dataset_card(kept, stats, Path(self.cfg.outdir) / "DATASET_CARD.md")
+        card = exporters.write_dataset_card(kept, stats, out / "DATASET_CARD.md")
 
         self.report["stats"] = stats
         self.report["files"] = written | {"card": card}
@@ -249,6 +259,21 @@ class Pipeline:
         self.report["llm_calls"] = len(self.runtime.calls)
         self.progress("done", {"records": len(kept), "outdir": self.cfg.outdir})
         return self.report
+
+    def write_splits(self, records: list[QARecord], out: Path) -> dict[str, str]:
+        splits = exporters.split_records(records, tuple(self.cfg.split), self.cfg.seed)
+        document_wise = exporters.split_is_document_wise(records)
+        written: dict[str, str] = {}
+        for name, subset in splits.items():
+            if subset:
+                written |= {f"{name}/{k}": v for k, v in exporters.export(subset, out / name, self.cfg.formats).items()}
+        self.report["splits"] = {
+            "sizes": {k: len(v) for k, v in splits.items()},
+            "document_wise": document_wise,
+            "note": "" if document_wise else "fewer than 3 source documents; split row-wise, so contexts overlap across splits",
+        }
+        self.progress("split", self.report["splits"]["sizes"] | {"document_wise": document_wise})
+        return written
 
     # ---------------------------------------------------------------- helpers
 
@@ -300,7 +325,7 @@ def _expand(paths: list[str]) -> list[Path]:
     for raw in paths:
         p = Path(raw)
         if p.is_dir():
-            out.extend(sorted(x for x in p.rglob("*") if x.suffix.lower() in (".pdf", ".md", ".markdown", ".txt")))
+            out.extend(sorted(x for x in p.rglob("*") if x.suffix.lower() in SUPPORTED))
         elif any(ch in raw for ch in "*?["):
             out.extend(sorted(Path().glob(raw)))
         else:

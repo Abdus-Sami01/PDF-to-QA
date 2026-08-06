@@ -35,7 +35,11 @@ def load(path: str | Path, backend: str = "auto", assets_dir: str | Path | None 
     if suffix in (".md", ".markdown", ".txt"):
         return from_markdown(p.read_text(encoding="utf-8", errors="replace"), source=p.name)
     if suffix != ".pdf":
-        raise ValueError(f"unsupported input type: {suffix}")
+        from .adapters import SUFFIXES, load as load_adapter
+
+        if suffix in SUFFIXES:
+            return load_adapter(p)
+        raise ValueError(f"unsupported input type: {suffix}; supported: .pdf .md .txt {' '.join(sorted(SUFFIXES))}")
     if backend in ("auto", "pymupdf"):
         try:
             return _from_pymupdf(p, assets_dir, dpi)
