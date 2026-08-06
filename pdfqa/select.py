@@ -184,14 +184,59 @@ def normalize(v: list[float]) -> list[float]:
     return [x / n for x in v]
 
 
+class HyperplaneIndex:
+    """Random-projection buckets so near-duplicate search does not compare every pair.
+
+    Several small tables rather than one big one: two vectors collide if they agree on any table's
+    bits, which keeps recall high at the cosine thresholds this pipeline uses.
+    """
+
+    def __init__(self, dim: int, tables: int = 8, bits: int = 8, seed: int = 13):
+        rng = random.Random(seed)
+        self.planes = [[[rng.gauss(0.0, 1.0) for _ in range(dim)] for _ in range(bits)] for _ in range(tables)]
+        self.buckets: list[dict[int, list[int]]] = [defaultdict(list) for _ in range(tables)]
+
+    def signature(self, vec: list[float]) -> list[int]:
+        out = []
+        for table in self.planes:
+            bits = 0
+            for b, plane in enumerate(table):
+                if sum(x * y for x, y in zip(plane, vec)) > 0.0:
+                    bits |= 1 << b
+            out.append(bits)
+        return out
+
+    def add(self, idx: int, vec: list[float]) -> None:
+        for table, sig in zip(self.buckets, self.signature(vec)):
+            table[sig].append(idx)
+
+    def candidates(self, vec: list[float]) -> set[int]:
+        out: set[int] = set()
+        for table, sig in zip(self.buckets, self.signature(vec)):
+            out.update(table.get(sig, ()))
+        return out
+
+
+EXACT_LIMIT = 2000
+
+
 def dedup_semantic(records: list[QARecord], vectors: list[list[float]], threshold: float = 0.92) -> tuple[list[QARecord], list[QARecord]]:
-    """k-center greedy: keep points that are far from everything already kept."""
+    """k-center greedy: keep points that are far from everything already kept.
+
+    Exact all-pairs below EXACT_LIMIT records, bucketed above it — the exact path is quadratic and
+    a large corpus will not survive it.
+    """
     order = sorted(range(len(records)), key=lambda i: -records[i].scores.get("quality", 0.0))
     kept_idx: list[int] = []
     dropped: list[QARecord] = []
+    index = HyperplaneIndex(len(vectors[0])) if len(records) > EXACT_LIMIT and vectors else None
+
     for i in order:
-        if all(cosine(vectors[i], vectors[j]) < threshold for j in kept_idx):
+        neighbours = kept_idx if index is None else index.candidates(vectors[i])
+        if all(cosine(vectors[i], vectors[j]) < threshold for j in neighbours):
             kept_idx.append(i)
+            if index is not None:
+                index.add(i, vectors[i])
         else:
             dropped.append(records[i])
     kept_idx.sort()
@@ -202,6 +247,8 @@ def dpp_select(records: list[QARecord], vectors: list[list[float]], budget_token
     """Greedy submodular selection maximising quality plus marginal coverage (MAP-style DPP)."""
     if not records:
         return []
+    if k is None and budget_tokens is None and len(records) > EXACT_LIMIT:
+        return list(records)
     quality = [max(0.05, r.scores.get("quality", 0.5)) ** quality_weight for r in records]
     selected: list[int] = []
     max_sim = [0.0] * len(records)

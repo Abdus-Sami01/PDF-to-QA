@@ -17,7 +17,13 @@ pdfqa run papers/ --backend ollama --model qwen2.5:7b -o dataset/
 
 **Structure, not flat text.** PDFs parse into a typed AST — headings, tables, equations,
 captions, footnotes — with parent/child/sibling links intact. Tables come out as HTML plus a cell
-grid, equations keep their LaTeX and numbering. Every node carries its page index and bounding box.
+grid. Every node carries its page index and bounding box.
+
+**Equations are parsed, not just stored.** LaTeX goes through a real tokeniser and parser into a
+syntax tree, so a dropped superscript, an unclosed brace, a `\frac` missing an argument, or a
+mismatched `\begin`/`\end` is reported with a reason instead of silently poisoning a chunk. A
+truncated equation ending on a bare operator is caught the same way. `pdfqa inspect` lists the
+malformed ones — a spike there usually means the extractor, not the paper, is at fault.
 
 **Figures come out as images.** Charts and diagrams are usually *drawn*, not embedded, so they
 never show up as image blocks — the engine reads the vector drawing regions, merges neighbouring
@@ -94,6 +100,11 @@ an axis, so they're checked against the rendered crop by a vision model instead.
 **Then it's deduped and coreset-selected.** MinHash + LSH kills near-identical source text and
 near-identical questions; k-center greedy drops semantic restatements; a greedy submodular (DPP-style)
 pass maximises diversity per token of budget; a final pass balances the simple/intermediate/complex mix.
+
+Semantic dedup is exact all-pairs on small runs and switches to random-projection buckets past
+~2000 records, where the quadratic path stops being affordable — measured 3.7× faster at 6000
+records with identical output, and the gap widens from there. Below the crossover the projection
+overhead costs more than it saves, so it stays exact.
 
 **Provenance survives to the export.** Every row carries source file, page indexes, bounding boxes,
 AST node ids, section breadcrumb, and the full pass/fail log of every gate it went through.

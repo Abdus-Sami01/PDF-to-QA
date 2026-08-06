@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from .latex import validate
 from .docast import (
     CAPTION,
     CODE,
@@ -178,21 +179,14 @@ def _equation_attrs(latex: str) -> dict:
     m = EQ_NUM_RE.search(latex.strip())
     if m:
         attrs["number"] = m.group(1)
-    attrs["symbols"] = sorted({s for s in re.findall(r"\\[a-zA-Z]+|[A-Za-z]\w*", latex)})[:32]
-    attrs["balanced"] = _balanced(latex)
+    checked = validate(latex)
+    attrs["symbols"] = checked["symbols"][:32]
+    attrs["tree"] = checked["tree"]
+    attrs["depth"] = checked["depth"]
+    attrs["balanced"] = checked["valid"]
+    if checked["issues"]:
+        attrs["issues"] = checked["issues"][:6]
     return attrs
-
-
-def _balanced(s: str) -> bool:
-    pairs = {")": "(", "]": "[", "}": "{"}
-    stack: list[str] = []
-    for ch in s:
-        if ch in "([{":
-            stack.append(ch)
-        elif ch in pairs:
-            if not stack or stack.pop() != pairs[ch]:
-                return False
-    return not stack
 
 
 def _table_attrs(rows: list[str]) -> dict:

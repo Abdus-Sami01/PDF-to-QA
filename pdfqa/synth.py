@@ -38,7 +38,8 @@ def _prov(chunk: Chunk, generator: str) -> Provenance:
 
 
 def generate_qa(runtime: Runtime, chunk: Chunk, n: int = 3, temperature: float = 0.8) -> list[QARecord]:
-    prompt = QA_GENERATE.format(breadcrumb=chunk.prov.breadcrumb, context=chunk.context()[:8000], n=n)
+    context = chunk.context()
+    prompt = QA_GENERATE.format(breadcrumb=chunk.prov.breadcrumb, context=context[:8000], n=n)
     raw = runtime.complete("generate", prompt, temperature=temperature, max_tokens=2048)
     data = parse_json(raw, default={}) or {}
     pairs = data.get("pairs", data if isinstance(data, list) else [])
@@ -49,7 +50,7 @@ def generate_qa(runtime: Runtime, chunk: Chunk, n: int = 3, temperature: float =
         rec = QARecord(
             question=str(p["question"]).strip(),
             answer=str(p["answer"]).strip(),
-            context=chunk.context(),
+            context=context,
             task="qa",
             difficulty=str(p.get("difficulty", "intermediate")).lower(),
             prov=_prov(chunk, "generate_qa"),
@@ -80,6 +81,7 @@ def generate_multihop(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int = 8, pe
         )
         raw = runtime.complete("generate", prompt, temperature=0.8, max_tokens=2048)
         data = parse_json(raw, default={}) or {}
+        joined = chunk_a.context() + "\n\n---\n\n" + chunk_b.context()
         for p in data.get("pairs", []) or []:
             if not isinstance(p, dict) or not p.get("question"):
                 continue
@@ -89,7 +91,7 @@ def generate_multihop(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int = 8, pe
                 QARecord(
                     question=str(p["question"]).strip(),
                     answer=str(p.get("answer", "")).strip(),
-                    context=chunk_a.context() + "\n\n---\n\n" + chunk_b.context(),
+                    context=joined,
                     task="multihop",
                     difficulty="complex",
                     hops=int(p.get("hops", 2) or 2),
@@ -122,6 +124,7 @@ def generate_cross_document(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int =
         )
         raw = runtime.complete("generate", prompt, temperature=0.8, max_tokens=2048)
         data = parse_json(raw, default={}) or {}
+        joined = chunk_a.context() + "\n\n---\n\n" + chunk_b.context()
         for p in data.get("pairs", []) or []:
             if not isinstance(p, dict) or not p.get("question"):
                 continue
@@ -133,7 +136,7 @@ def generate_cross_document(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int =
                 QARecord(
                     question=str(p["question"]).strip(),
                     answer=str(p.get("answer", "")).strip(),
-                    context=chunk_a.context() + "\n\n---\n\n" + chunk_b.context(),
+                    context=joined,
                     task="cross_document",
                     difficulty="complex",
                     hops=int(p.get("hops", 2) or 2),
@@ -248,6 +251,7 @@ def repair_trace(rec: QARecord, timeout: float = 10.0) -> QARecord:
 def generate_figure_qa(runtime: Runtime, chunk: Chunk, n: int = 2) -> list[QARecord]:
     """Multimodal pairs: the rendered figure crop is sent alongside its caption and section text."""
     out: list[QARecord] = []
+    body = chunk.text
     for fig in chunk.images():
         prompt = FIGURE_QA.format(
             breadcrumb=chunk.prov.breadcrumb,
@@ -271,7 +275,7 @@ def generate_figure_qa(runtime: Runtime, chunk: Chunk, n: int = 2) -> list[QARec
             rec = QARecord(
                 question=str(p["question"]).strip(),
                 answer=str(p["answer"]).strip(),
-                context=f"{fig.get('caption', '')}\n\n{chunk.text}".strip(),
+                context=f"{fig.get('caption', '')}\n\n{body}".strip(),
                 task="figure_qa",
                 difficulty="intermediate",
                 images=[fig["image_path"]],

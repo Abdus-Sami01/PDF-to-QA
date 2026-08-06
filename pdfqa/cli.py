@@ -10,7 +10,7 @@ from pathlib import Path
 from .cache import Store
 from .chunking import chunk_tree
 from .config import Config
-from .docast import HEADING
+from .docast import EQUATION, HEADING
 from .export import audit, load_records
 from .extract import load
 from .graph import build_graph, dump
@@ -81,6 +81,11 @@ def cmd_inspect(args) -> int:
         for n in rendered:
             print(f"  {n.id}  p{n.span.page}  {n.attrs['image_width']}x{n.attrs['image_height']}  "
                   f"{n.attrs.get('caption', '')[:50]}  {n.attrs['image_path']}")
+    broken = [n for n in tree.nodes([EQUATION]) if n.attrs.get("issues")]
+    if broken:
+        print(f"\nmalformed equations: {len(broken)} of {len(tree.nodes([EQUATION]))}")
+        for n in broken[:10]:
+            print(f"  [{n.id}] {n.text[:60]!r}\n      {'; '.join(n.attrs['issues'])}")
     unresolved = [r for r in tree.references if not r.resolved]
     if unresolved:
         print(f"\nunresolved references: {len(unresolved)}")
