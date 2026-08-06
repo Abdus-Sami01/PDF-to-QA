@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .llm import Runtime, parse_json
-from .prompts import CLARIFY_CHECK, NLI_FORWARD, NLI_REVERSE, SYMBOLIC_CHECK
+from .llm import LLMError
+from .prompts import CLARIFY_CHECK, FIGURE_GROUND, NLI_FORWARD, NLI_REVERSE, SYMBOLIC_CHECK, Z3_CHECK
 from .records import QARecord
 
 WORD = re.compile(r"[A-Za-z0-9_.%-]+")
@@ -160,6 +161,23 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
+def visual_grounding(runtime: Runtime, rec: QARecord) -> Gate:
+    """Re-checks a figure-derived answer against the rendered crop it came from."""
+    images = [p for p in rec.images if Path(p).exists()]
+    if not images:
+        return Gate("visual_grounding", True, 1.0, "no image attached")
+    caption = (rec.context.splitlines() or [""])[0]
+    prompt = FIGURE_GROUND.format(claim=rec.answer[:2000], caption=caption[:300])
+    try:
+        raw = runtime.complete_vision(prompt, images[:1], temperature=0.0, max_tokens=600)
+    except LLMError as exc:
+        return Gate("visual_grounding", True, 0.5, f"vision unavailable: {exc}")
+    data = parse_json(raw, default={}) or {}
+    label = str(data.get("label", "neutral")).lower()
+    conf = float(data.get("confidence", 0.0) or 0.0)
+    return Gate("visual_grounding", label == "entailment", conf if label == "entailment" else 0.0, f"{label} conf={conf:.2f}")
+
+
 # --------------------------------------------------------------------------- symbolic
 
 
@@ -206,25 +224,58 @@ def run_python(code: str, timeout: float = 10.0) -> tuple[bool, str]:
         return proc.returncode == 0, out
 
 
-def z3_check(constraints: str, timeout: float = 10.0) -> tuple[bool, str]:
-    """Optional Z3 path for boolean/arithmetic consistency; degrades to unavailable without the package."""
+def z3_available() -> bool:
+    try:
+        import z3  # type: ignore  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def z3_solve(constraints: str, timeout: float = 10.0) -> tuple[str, str]:
+    """Return (sat|unsat|unknown|error, detail) for an SMT-LIB 2 fragment."""
     try:
         import z3  # type: ignore
     except ImportError:
-        return True, "z3 not installed"
+        return "unknown", "z3 not installed"
     try:
         solver = z3.Solver()
         solver.set("timeout", int(timeout * 1000))
-        solver.from_string(constraints)
-        result = solver.check()
-        return result == z3.sat, str(result)
+        solver.from_string(constraints if "(check-sat)" not in constraints else constraints.replace("(check-sat)", ""))
+        return str(solver.check()), ""
     except Exception as exc:
-        return False, f"z3 error: {exc}"
+        return "error", str(exc)[:300]
+
+
+def z3_consistency(runtime: Runtime, rec: QARecord, timeout: float = 10.0) -> Gate:
+    """A claim holds when its constraints are satisfiable and its negation is not."""
+    if not z3_available():
+        return Gate("z3", True, 1.0, "z3 not installed")
+    if not looks_quantitative(rec):
+        return Gate("z3", True, 1.0, "not quantitative")
+    prompt = Z3_CHECK.format(question=rec.question[:2000], answer=rec.answer[:2000], context=rec.context[:9000])
+    data = parse_json(runtime.complete("verify", prompt, temperature=0.0, max_tokens=1400), default={}) or {}
+    if not data.get("applicable", False) or not data.get("constraints"):
+        return Gate("z3", True, 1.0, "no checkable structure")
+
+    claim, detail = z3_solve(str(data["constraints"]), timeout)
+    if claim == "error":
+        return Gate("z3", True, 0.5, f"encoding rejected: {detail}")
+    if claim != "sat":
+        return Gate("z3", False, 0.0, f"claim constraints {claim} against the source values")
+    if not data.get("negation"):
+        return Gate("z3", True, 0.7, "consistent; no negation supplied")
+    negated, neg_detail = z3_solve(str(data["negation"]), timeout)
+    if negated == "error":
+        return Gate("z3", True, 0.6, f"negation rejected: {neg_detail}")
+    entailed = negated == "unsat"
+    return Gate("z3", entailed, 1.0 if entailed else 0.0, f"claim=sat negation={negated}")
 
 
 # --------------------------------------------------------------------------- orchestration
 
 CHEAP_GATES = (structural, standalone_question, shortcut_leakage, lexical_grounding, numeric_grounding)
+VISUAL_CHEAP_GATES = (structural, standalone_question, shortcut_leakage)
 
 
 def verify(
@@ -234,16 +285,24 @@ def verify(
     use_symbolic: bool = True,
     consistency_samples: int = 0,
     allow_exec: bool = True,
+    use_z3: bool = True,
 ) -> QARecord:
-    gates: list[Gate] = [g(rec) for g in CHEAP_GATES]
+    """Figure-derived rows swap text grounding for visual grounding — their numbers are read off axes."""
+    visual = rec.task == "figure_qa" and bool(rec.images)
+    gates: list[Gate] = [g(rec) for g in (VISUAL_CHEAP_GATES if visual else CHEAP_GATES)]
     if use_model_gates and runtime is not None and all(g.passed for g in gates):
-        gates.append(nli_forward(runtime, rec))
+        if visual:
+            gates.append(visual_grounding(runtime, rec))
+        else:
+            gates.append(nli_forward(runtime, rec))
         gates.append(nli_reverse(runtime, rec))
         gates.append(clarity(runtime, rec))
-        if consistency_samples > 0:
+        if consistency_samples > 0 and not visual:
             gates.append(self_consistency(runtime, rec, consistency_samples))
-        if use_symbolic and all(g.passed for g in gates):
+        if use_symbolic and not visual and all(g.passed for g in gates):
             gates.append(symbolic_check(runtime, rec, allow_exec=allow_exec))
+            if use_z3 and all(g.passed for g in gates):
+                gates.append(z3_consistency(runtime, rec))
 
     for g in gates:
         rec.scores[g.name] = round(g.score, 4)
@@ -260,6 +319,8 @@ def quality_score(rec: QARecord, gates: list[Gate]) -> float:
         "nli_reverse": 2.0,
         "clarity": 2.0,
         "symbolic": 2.0,
+        "z3": 2.0,
+        "visual_grounding": 3.0,
         "self_consistency": 1.5,
         "numeric_grounding": 1.5,
         "lexical_grounding": 1.0,

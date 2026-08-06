@@ -55,9 +55,20 @@ def as_react(rec: QARecord) -> dict:
     return {"question": rec.question, "trace": steps, "answer": rec.answer}
 
 
+def as_multimodal(rec: QARecord) -> dict:
+    """Interleaved image+text turn, the shape LLaVA-style and OpenAI vision trainers expect."""
+    content = [{"type": "image", "image": p} for p in rec.images]
+    content.append({"type": "text", "text": rec.question})
+    return {
+        "messages": [{"role": "user", "content": content}, {"role": "assistant", "content": rec.answer}],
+        "images": rec.images,
+    }
+
+
 def _meta(rec: QARecord) -> dict:
     return {
         "id": rec.id,
+        "images": rec.images,
         "task": rec.task,
         "persona": rec.persona,
         "difficulty": rec.difficulty,
@@ -70,7 +81,9 @@ def _meta(rec: QARecord) -> dict:
     }
 
 
-FORMATS = ("chatml", "sharegpt", "alpaca", "openai", "axolotl", "llamafactory", "unsloth", "dpo", "react", "raw")
+FORMATS = ("chatml", "sharegpt", "alpaca", "openai", "axolotl", "llamafactory", "unsloth", "dpo", "react", "multimodal", "raw")
+
+SUBSET = {"dpo": lambda r: bool(r.rejected), "react": lambda r: bool(r.tool_trace), "multimodal": lambda r: bool(r.images)}
 
 
 def export(records: list[QARecord], outdir: str | Path, formats: list[str] | None = None, system: str = DEFAULT_SYSTEM, with_meta: bool = True) -> dict[str, str]:
@@ -91,12 +104,14 @@ def export(records: list[QARecord], outdir: str | Path, formats: list[str] | Non
             rows = [as_dpo(r, system) for r in records if r.rejected]
         elif fmt == "react":
             rows = [as_react(r) for r in records if r.tool_trace]
+        elif fmt == "multimodal":
+            rows = [as_multimodal(r) for r in records if r.images]
         else:
             rows = [r.as_dict() for r in records]
 
         if with_meta and fmt != "raw":
-            subset = [r for r in records if (fmt != "dpo" or r.rejected) and (fmt != "react" or r.tool_trace)]
-            for row, rec in zip(rows, subset):
+            keep = SUBSET.get(fmt, lambda r: True)
+            for row, rec in zip(rows, [r for r in records if keep(r)]):
                 row["meta"] = _meta(rec)
 
         written[fmt] = str(_write_jsonl(out / f"{fmt}.jsonl", rows))
@@ -121,6 +136,7 @@ def write_parquet(records: list[QARecord], path: str | Path) -> str | None:
             "question": [r.question for r in records],
             "answer": [r.answer for r in records],
             "rejected": [r.rejected for r in records],
+            "images": [json.dumps(r.images) for r in records],
             "context": [r.context for r in records],
             "messages": [json.dumps(r.messages(), ensure_ascii=False) for r in records],
             "task": [r.task for r in records],

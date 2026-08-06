@@ -6,6 +6,7 @@ stronger cloud model without any call site knowing which backend it landed on.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -14,9 +15,25 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
-ROLES = ("generate", "verify", "embed")
+ROLES = ("generate", "verify", "embed", "vision")
+
+IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
+
+
+def encode_image(path: str) -> tuple[str, str]:
+    """Return (mime, base64) for an image on disk."""
+    p = Path(path)
+    mime = IMAGE_MIME.get(p.suffix.lower())
+    if mime is None:
+        raise LLMError(f"unsupported image type: {p.suffix}")
+    data = p.read_bytes()
+    if len(data) > MAX_IMAGE_BYTES:
+        raise LLMError(f"{p.name} is {len(data)} bytes, over the {MAX_IMAGE_BYTES} limit")
+    return mime, base64.b64encode(data).decode("ascii")
 
 
 class LLMError(RuntimeError):
@@ -39,6 +56,9 @@ class Backend:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         raise NotImplementedError(f"{self.name} has no embedding endpoint")
+
+    def complete_vision(self, prompt: str, images: list[str], system: str = "", temperature: float = 0.7, max_tokens: int = 1024) -> Completion:
+        raise NotImplementedError(f"{self.name} has no vision endpoint")
 
 
 def _post(url: str, payload: dict, headers: dict, timeout: float) -> dict:
@@ -82,6 +102,22 @@ class OpenAICompatible(Backend):
         data = _post(f"{self.base_url}/embeddings", {"model": self.model, "input": texts}, self._headers(), self.timeout)
         return [d["embedding"] for d in data["data"]]
 
+    def complete_vision(self, prompt, images, system="", temperature=0.7, max_tokens=1024):
+        content: list[dict] = []
+        for path in images:
+            mime, b64 = encode_image(path)
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        content.append({"type": "text", "text": prompt})
+        messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": content}]
+        t0 = time.time()
+        data = _post(
+            f"{self.base_url}/chat/completions",
+            {"model": self.model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens},
+            self._headers(),
+            self.timeout,
+        )
+        return Completion(data["choices"][0]["message"]["content"], self.model, time.time() - t0, data.get("usage", {}))
+
 
 class Anthropic(Backend):
     name = "anthropic"
@@ -108,6 +144,20 @@ class Anthropic(Backend):
             {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"},
             self.timeout,
         )
+        text = "".join(b.get("text", "") for b in data.get("content", []))
+        return Completion(text, self.model, time.time() - t0, data.get("usage", {}))
+
+    def complete_vision(self, prompt, images, system="", temperature=0.7, max_tokens=1024):
+        content: list[dict] = []
+        for path in images:
+            mime, b64 = encode_image(path)
+            content.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}})
+        content.append({"type": "text", "text": prompt})
+        payload = {"model": self.model, "max_tokens": max_tokens, "temperature": temperature, "messages": [{"role": "user", "content": content}]}
+        if system:
+            payload["system"] = system
+        t0 = time.time()
+        data = _post(f"{self.base_url}/messages", payload, {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}, self.timeout)
         text = "".join(b.get("text", "") for b in data.get("content", []))
         return Completion(text, self.model, time.time() - t0, data.get("usage", {}))
 
@@ -143,6 +193,24 @@ class Ollama(Backend):
             out.append(data["embedding"])
         return out
 
+    def complete_vision(self, prompt, images, system="", temperature=0.7, max_tokens=1024):
+        encoded = [encode_image(p)[1] for p in images]
+        t0 = time.time()
+        data = _post(
+            f"{self.base_url}/api/generate",
+            {
+                "model": self.model,
+                "prompt": prompt,
+                "system": system,
+                "images": encoded,
+                "stream": False,
+                "options": {"temperature": temperature, "num_predict": max_tokens},
+            },
+            {},
+            self.timeout,
+        )
+        return Completion(data.get("response", ""), self.model, time.time() - t0)
+
 
 class Echo(Backend):
     """Deterministic offline backend so the whole pipeline runs, and is testable, with no API key."""
@@ -160,6 +228,10 @@ class Echo(Backend):
 
     def embed(self, texts):
         return [hashed_embedding(t) for t in texts]
+
+    def complete_vision(self, prompt, images, system="", temperature=0.7, max_tokens=1024):
+        tag = " ".join(Path(p).name for p in images)
+        return self.complete(f"{prompt}\n\n[images: {tag}]", system, temperature, max_tokens)
 
 
 def hashed_embedding(text: str, dim: int = 256) -> list[float]:
@@ -212,6 +284,25 @@ class Runtime:
                 if attempt < self.retries:
                     time.sleep(self.backoff * (2**attempt))
         raise LLMError(f"role={role} failed after {self.retries + 1} attempts: {last}")
+
+    def has_vision(self) -> bool:
+        return "vision" in self.backends
+
+    def complete_vision(self, prompt: str, images: list[str], system: str = "", temperature: float = 0.7, max_tokens: int = 1024) -> str:
+        backend = self.backends.get("vision") or self.backend("generate")
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                out = backend.complete_vision(prompt, images, system, temperature, max_tokens)
+                self.calls.append({"role": "vision", "model": out.model, "latency": out.latency, "usage": out.usage})
+                return out.text
+            except NotImplementedError as exc:
+                raise LLMError(f"vision backend {backend.name} cannot accept images") from exc
+            except LLMError as exc:
+                last = exc
+                if attempt < self.retries:
+                    time.sleep(self.backoff * (2**attempt))
+        raise LLMError(f"vision failed after {self.retries + 1} attempts: {last}")
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         backend = self.backends.get("embed")

@@ -45,6 +45,7 @@ class Chunk:
     tables: list[str] = field(default_factory=list)
     equations: list[str] = field(default_factory=list)
     figures: list[str] = field(default_factory=list)
+    figure_refs: list[dict] = field(default_factory=list)
     resolved_refs: str = ""
     tokens: int = 0
     id: str = ""
@@ -64,7 +65,12 @@ class Chunk:
             parts.append("Equations:\n" + "\n".join(self.equations))
         if self.resolved_refs:
             parts.append("Resolved references:\n" + self.resolved_refs)
+        if self.figure_refs:
+            parts.append("Figures:\n" + "\n".join(f"[{f['id']}] {f.get('caption', 'unlabelled figure')}" for f in self.figure_refs))
         return "\n\n".join(p for p in parts if p)
+
+    def images(self) -> list[dict]:
+        return [f for f in self.figure_refs if f.get("image_path")]
 
 
 @dataclass
@@ -86,6 +92,7 @@ class QARecord:
     rejected: str = ""
     rejection_mode: str = ""
     tool_trace: list[dict] = field(default_factory=list)
+    images: list[str] = field(default_factory=list)
     scores: dict[str, float] = field(default_factory=dict)
     flags: list[str] = field(default_factory=list)
     prov: Provenance = field(default_factory=Provenance)

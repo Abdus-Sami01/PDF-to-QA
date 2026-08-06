@@ -19,6 +19,13 @@ pdfqa run papers/ --backend ollama --model qwen2.5:7b -o dataset/
 captions, footnotes — with parent/child/sibling links intact. Tables come out as HTML plus a cell
 grid, equations keep their LaTeX and numbering. Every node carries its page index and bounding box.
 
+**Figures come out as images.** Charts and diagrams are usually *drawn*, not embedded, so they
+never show up as image blocks — the engine reads the vector drawing regions, merges neighbouring
+strokes into one figure, pulls in the axis ticks and data labels that sit just outside the drawing
+bbox, and renders the region to PNG at your chosen DPI. Detected tables get rendered too. Each
+crop is bound to its caption and carries page, bbox, and pixel dimensions. Chart-shaped false
+positives from table detection are filtered out by cell fill ratio, so a bar chart stays a figure.
+
 **References resolve.** `[3]`, `Table 2`, `Eq. 4`, `Section 3.1` get bound to their actual targets
 in the tree. When a chunk says "as shown in Table 2", the generator sees Table 2.
 
@@ -38,6 +45,7 @@ sections — so answering genuinely requires combining two places in the paper.
 | `qa` | Single-hop grounded pairs, mixed difficulty |
 | `multihop` | Questions requiring two disjoint sections, sampled via KG paths |
 | `multiturn` | Dialogue trees with follow-ups, clarification, and corrected user misassumptions |
+| `figure_qa` | Multimodal pairs — the rendered figure crop is sent to a vision model with its caption and section text |
 | `react` | Tool-calling traces (python / sql / lookup) with real observations |
 | DPO pairs | Chosen answer plus a mutated rejected one — number hallucination, unit mismatch, off-by-one, causal inversion, and five more |
 
@@ -53,8 +61,13 @@ implicit phrasing.
 - *Numeric grounding* — every number in the answer traced back to the source, with rounding tolerance
 - *Shortcut detection* — rejects questions that already contain their own answer tokens
 - *Symbolic check* — quantitative claims get compiled to Python and executed in a restricted
-  subprocess; Z3 is used for boolean constraints when installed
+  subprocess
+- *Z3* — the same claim is encoded as SMT-LIB constraints; it passes only if the constraints are
+  satisfiable **and** their negation is unsatisfiable, which is entailment rather than mere consistency
 - *Self-consistency* — optional re-answer voting
+
+Figure-derived rows take a different route: text grounding would falsely reject numbers read off
+an axis, so they're checked against the rendered crop by a vision model instead.
 
 **Then it's deduped and coreset-selected.** MinHash + LSH kills near-identical source text and
 near-identical questions; k-center greedy drops semantic restatements; a greedy submodular (DPP-style)
@@ -72,8 +85,13 @@ cloud model:
 runtime:
   generate: { backend: ollama, model: qwen2.5:7b, base_url: http://localhost:11434 }
   verify:   { backend: anthropic, model: claude-sonnet-4-5 }
+  vision:   { backend: anthropic, model: claude-sonnet-4-5 }
   workers: 8
 ```
+
+Figure QA only runs when a `vision` role is configured; without one the pipeline skips it and
+everything else proceeds. Images are sent as base64 in whatever shape the backend expects —
+Anthropic image blocks, OpenAI `image_url` parts, or Ollama's `images` array.
 
 Backends: `ollama`, `vllm` and any OpenAI-compatible server, `openai`, `anthropic`, and `echo`
 (offline, deterministic — the whole pipeline runs with no API key).
@@ -84,10 +102,12 @@ PDF parsing, Parquet, YAML config, and Z3 are all optional extras.
 ## Exports
 
 `chatml`, `sharegpt`, `alpaca`, `openai`, `axolotl`, `llamafactory`, `unsloth`, `dpo`, `react`,
-`raw`, plus a Parquet file for `datasets.load_dataset` and a generated dataset card.
+`multimodal`, `raw`, plus a Parquet file for `datasets.load_dataset` and a generated dataset card.
+Rendered figure crops land in `<outdir>/assets/<pdf-stem>/` and the `multimodal` rows point at them.
 
 ```bash
-pdfqa run docs/ -f chatml dpo parquet --limit 2000
+pdfqa run docs/ -f chatml dpo multimodal --limit 2000 --vision anthropic
+pdfqa run docs/ --no-figures        # skip rendering and multimodal synthesis entirely
 ```
 
 ## Incremental
@@ -104,7 +124,7 @@ pdfqa cache --clear --stage graph
 
 ```bash
 pdfqa run <inputs>       # full pipeline
-pdfqa inspect <file>     # AST outline, resolved references, chunk plan
+pdfqa inspect <file>     # AST outline, resolved references, rendered images, chunk plan
 pdfqa graph <file>       # knowledge graph stats and multi-hop seed pairs
 pdfqa cache              # cache state
 pdfqa init pdfqa.yaml    # starter config
@@ -142,7 +162,9 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests run fully offline against a scripted backend — no API key, no network.
+Tests run fully offline against a scripted backend — no API key, no network. The PDF suite builds
+its own fixture (`tests/fixtures/make_pdf.py`) containing a vector bar chart and a bordered table,
+then asserts the chart is extracted as a figure, the table as a table, and both crops render.
 
 ## License
 

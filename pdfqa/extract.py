@@ -11,6 +11,7 @@ from .docast import (
     CODE,
     DOCUMENT,
     EQUATION,
+    FIGURE,
     FOOTNOTE,
     HEADING,
     LIST,
@@ -27,7 +28,7 @@ EQ_NUM_RE = re.compile(r"\((\d{1,3})\)\s*$")
 MATH_CHARS = set("∑∫∂√≈≠≤≥±×÷αβγδθλμσπΣΩ∈∀∃→⇒^_=")
 
 
-def load(path: str | Path, backend: str = "auto") -> DocumentTree:
+def load(path: str | Path, backend: str = "auto", assets_dir: str | Path | None = None, dpi: int = 144) -> DocumentTree:
     p = Path(path)
     suffix = p.suffix.lower()
     if suffix in (".md", ".markdown", ".txt"):
@@ -36,7 +37,7 @@ def load(path: str | Path, backend: str = "auto") -> DocumentTree:
         raise ValueError(f"unsupported input type: {suffix}")
     if backend in ("auto", "pymupdf"):
         try:
-            return _from_pymupdf(p)
+            return _from_pymupdf(p, assets_dir, dpi)
         except ImportError:
             if backend == "pymupdf":
                 raise
@@ -215,20 +216,24 @@ def _grid_to_html(grid: list[list[str]]) -> str:
 # --------------------------------------------------------------------------- pdf
 
 
-def _from_pymupdf(path: Path) -> DocumentTree:
+def _from_pymupdf(path: Path, assets_dir: str | Path | None = None, dpi: int = 144) -> DocumentTree:
     import fitz  # type: ignore
 
     doc = fitz.open(path)
+    assets = Path(assets_dir) / path.stem if assets_dir else None
+    if assets:
+        assets.mkdir(parents=True, exist_ok=True)
     raw: list[dict] = []
     tables: list[dict] = []
     for pno, page in enumerate(doc):
-        for tbl in _pymupdf_tables(page):
-            tables.append({"page": pno, **tbl})
+        page_tables = _pymupdf_tables(page)
         page_dict = page.get_text("dict")
+        page_blocks: list[dict] = []
+        images: list[dict] = []
         for block in page_dict.get("blocks", []):
             if block.get("type") != 0:
                 bbox = tuple(block.get("bbox", (0, 0, 0, 0)))
-                raw.append({"kind": "image", "page": pno, "bbox": bbox, "text": "", "size": 0.0, "bold": False})
+                images.append({"kind": "image", "page": pno, "bbox": bbox, "text": "", "size": 0.0, "bold": False})
                 continue
             lines, sizes, bold = [], [], 0
             for line in block.get("lines", []):
@@ -241,7 +246,7 @@ def _from_pymupdf(path: Path) -> DocumentTree:
             body = "\n".join(lines).strip()
             if not body:
                 continue
-            raw.append(
+            page_blocks.append(
                 {
                     "kind": "text",
                     "page": pno,
@@ -251,8 +256,150 @@ def _from_pymupdf(path: Path) -> DocumentTree:
                     "bold": bold > 0,
                 }
             )
+        images.extend(_vector_regions(page, pno))
+        figures = _reject_table_overlap(_cluster_regions(images), [t["bbox"] for t in page_tables])
+        consumed = _absorb_labels(figures, page_blocks)
+        page_blocks = [b for b in page_blocks if id(b) not in consumed]
+        if assets:
+            for i, fig in enumerate(figures):
+                _render_clip(page, fig["bbox"], assets / f"p{pno:03d}-fig{i:02d}.png", dpi, fig)
+            for i, tbl in enumerate(page_tables):
+                _render_clip(page, tbl["bbox"], assets / f"p{pno:03d}-tbl{i:02d}.png", dpi, tbl)
+        page_blocks.extend(figures)
+        page_blocks.sort(key=lambda b: (round(b["bbox"][1], 1), b["bbox"][0]))
+        raw.extend(page_blocks)
+        tables.extend({"page": pno, **t} for t in page_tables)
     doc.close()
     return _assemble(raw, tables, source=path.name, title=_pdf_title(raw, path))
+
+
+MIN_FIGURE_SIDE = 24.0
+MAX_PAGE_COVERAGE = 0.92
+CLIP_PAD = 6.0
+
+
+MIN_STROKE_SIDE = 3.0
+
+
+def _vector_regions(page, pno: int) -> list[dict]:
+    """Charts and diagrams are drawn, not embedded, so they never appear as image blocks."""
+    getter = getattr(page, "get_drawings", None)
+    if getter is None:
+        return []
+    try:
+        drawings = getter()
+    except Exception:
+        return []
+    out = []
+    page_area = max(1.0, page.rect.width * page.rect.height)
+    for d in drawings:
+        rect = d.get("rect")
+        if rect is None:
+            continue
+        w, h = rect.width, rect.height
+        if max(w, h) < MIN_STROKE_SIDE:
+            continue
+        if (w * h) / page_area > MAX_PAGE_COVERAGE:
+            continue
+        out.append({"kind": "image", "page": pno, "bbox": tuple(rect), "text": "", "size": 0.0, "bold": False})
+    return out
+
+
+MAX_LABEL_CHARS = 40
+
+
+def _absorb_labels(figures: list[dict], blocks: list[dict], margin: float = 16.0) -> set[int]:
+    """Axis ticks and data labels are text, so the drawing bbox misses them; pull them in."""
+    consumed: set[int] = set()
+    for fig in figures:
+        grew = True
+        while grew:
+            grew = False
+            zone = (fig["bbox"][0] - margin, fig["bbox"][1] - margin, fig["bbox"][2] + margin, fig["bbox"][3] + margin)
+            for block in blocks:
+                if id(block) in consumed or block["page"] != fig["page"]:
+                    continue
+                text = block["text"].strip()
+                if len(text) > MAX_LABEL_CHARS or CAPTION_RE.match(text):
+                    continue
+                if _intersect_area(block["bbox"], zone) / max(1.0, _area(block["bbox"])) < 0.6:
+                    continue
+                fig["bbox"] = _union(fig["bbox"], block["bbox"])
+                consumed.add(id(block))
+                grew = True
+    return consumed
+
+
+def _reject_table_overlap(figures: list[dict], table_boxes: list[tuple], overlap: float = 0.5) -> list[dict]:
+    """Table rules are drawings too; drop any region a detected table already covers."""
+    out = []
+    for fig in figures:
+        area = max(1.0, _area(fig["bbox"]))
+        if any(_intersect_area(fig["bbox"], tb) / area > overlap for tb in table_boxes):
+            continue
+        out.append(fig)
+    return out
+
+
+def _area(b: tuple) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def _intersect_area(a: tuple, b: tuple) -> float:
+    return _area((max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])))
+
+
+def _cluster_regions(images: list[dict], gap: float = 14.0) -> list[dict]:
+    """Vector figures arrive as many small blocks; merge neighbours into one figure region."""
+    boxes = [dict(b) for b in images]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                if _near(boxes[i]["bbox"], boxes[j]["bbox"], gap):
+                    boxes[i]["bbox"] = _union(boxes[i]["bbox"], boxes[j]["bbox"])
+                    boxes.pop(j)
+                    merged = True
+                    break
+            if merged:
+                break
+    out = []
+    for b in boxes:
+        x0, y0, x1, y1 = b["bbox"]
+        if (x1 - x0) < MIN_FIGURE_SIDE or (y1 - y0) < MIN_FIGURE_SIDE:
+            continue
+        out.append(b)
+    return out
+
+
+def _near(a: tuple, b: tuple, gap: float) -> bool:
+    return not (a[2] + gap < b[0] or b[2] + gap < a[0] or a[3] + gap < b[1] or b[3] + gap < a[1])
+
+
+def _union(a: tuple, b: tuple) -> tuple:
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def _render_clip(page, bbox: tuple, out_path: Path, dpi: int, sink: dict) -> None:
+    import fitz  # type: ignore
+
+    rect = (fitz.Rect(*bbox) + (-CLIP_PAD, -CLIP_PAD, CLIP_PAD, CLIP_PAD)) & page.rect
+    if rect.is_empty or rect.width < MIN_FIGURE_SIDE or rect.height < MIN_FIGURE_SIDE:
+        return
+    if (rect.width * rect.height) / max(1.0, page.rect.width * page.rect.height) > MAX_PAGE_COVERAGE:
+        return
+    scale = dpi / 72.0
+    try:
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=rect)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pix.save(out_path)
+    except Exception:
+        return
+    sink["image_path"] = str(out_path)
+    sink["image_width"] = pix.width
+    sink["image_height"] = pix.height
+    sink["image_dpi"] = dpi
 
 
 def _pymupdf_tables(page) -> list[dict]:
@@ -269,10 +416,19 @@ def _pymupdf_tables(page) -> list[dict]:
             grid = [[("" if c is None else str(c)).strip() for c in row] for row in t.extract()]
         except Exception:
             continue
-        if not grid:
+        if not _plausible_table(grid):
             continue
         out.append({"bbox": tuple(t.bbox), "grid": grid, "html": _grid_to_html(grid)})
     return out
+
+
+def _plausible_table(grid: list[list[str]], min_fill: float = 0.5) -> bool:
+    """Chart axes and boxed callouts get detected as tables; real tables are mostly full."""
+    if len(grid) < 2 or max((len(r) for r in grid), default=0) < 2:
+        return False
+    cells = [c for row in grid for c in row]
+    filled = sum(1 for c in cells if c.strip())
+    return bool(cells) and filled / len(cells) >= min_fill
 
 
 def _from_pdfminer(path: Path) -> DocumentTree:
@@ -321,9 +477,11 @@ def _assemble(raw: list[dict], tables: list[dict], source: str, title: str) -> D
 
     for block in raw:
         if block["kind"] == "image":
-            node = Node("figure", span=Span(block["page"], block["bbox"]))
+            node = Node(FIGURE, span=Span(block["page"], block["bbox"]), attrs=_image_attrs(block))
             stack[-1].add(node)
-            pending_caption = None
+            if pending_caption is not None:
+                node.attrs["caption"] = pending_caption.text
+                pending_caption = None
             continue
         if _inside(block, consumed):
             continue
@@ -341,17 +499,38 @@ def _assemble(raw: list[dict], tables: list[dict], source: str, title: str) -> D
             pending_caption = node
 
     for tbl in tables:
-        node = Node(
-            TABLE,
-            text=_grid_to_text(tbl["grid"]),
-            span=Span(tbl["page"], tbl["bbox"]),
-            attrs={"grid": tbl["grid"], "html": tbl["html"], "n_rows": len(tbl["grid"]), "n_cols": max((len(r) for r in tbl["grid"]), default=0)},
-        )
+        attrs = {
+            "grid": tbl["grid"],
+            "html": tbl["html"],
+            "n_rows": len(tbl["grid"]),
+            "n_cols": max((len(r) for r in tbl["grid"]), default=0),
+            **_image_attrs(tbl),
+        }
+        node = Node(TABLE, text=_grid_to_text(tbl["grid"]), span=Span(tbl["page"], tbl["bbox"]), attrs=attrs)
         _nearest_section(root, tbl["page"]).add(node)
+        caption = _caption_near(root, tbl["page"], tbl["bbox"])
+        if caption:
+            node.attrs["caption"] = caption
 
     tree = DocumentTree(root, source=source, meta={"title": title, "format": "pdf", "pages": 1 + max((b["page"] for b in raw), default=0)})
     tree.bind_references()
     return tree
+
+
+def _image_attrs(block: dict) -> dict:
+    return {k: block[k] for k in ("image_path", "image_width", "image_height", "image_dpi") if k in block}
+
+
+def _caption_near(root: Node, page: int, bbox: tuple, max_gap: float = 60.0) -> str:
+    """Match a rendered table to the caption sitting directly above or below it."""
+    best, best_gap = "", max_gap
+    for node in root.walk():
+        if node.kind != CAPTION or node.span.page != page or not node.span.bbox:
+            continue
+        gap = min(abs(node.span.bbox[1] - bbox[3]), abs(bbox[1] - node.span.bbox[3]))
+        if gap < best_gap:
+            best, best_gap = node.text, gap
+    return best
 
 
 def _grid_to_text(grid: list[list[str]]) -> str:
@@ -359,7 +538,11 @@ def _grid_to_text(grid: list[list[str]]) -> str:
 
 
 def _body_size(raw: list[dict]) -> float:
-    sizes = Counter(round(b["size"], 1) for b in raw if b["kind"] == "text" and b["text"])
+    """Weight by characters, not blocks — a page of tiny axis labels must not define body size."""
+    sizes: Counter = Counter()
+    for b in raw:
+        if b["kind"] == "text" and b["text"]:
+            sizes[round(b["size"], 1)] += len(b["text"])
     return sizes.most_common(1)[0][0] if sizes else 10.0
 
 

@@ -182,6 +182,62 @@ REJECTION_MODES = {
     "stale_scope": "answer a related question the user did not ask",
 }
 
+FIGURE_QA = """You are looking at a figure extracted from a technical document.
+
+Section: {breadcrumb}
+Caption: {caption}
+Surrounding text:
+---
+{context}
+---
+
+Write {n} question-answer pairs about what the image actually shows — trends, axis values,
+comparisons between series, the shape of a curve, or what a diagram's arrows mean.
+Rules:
+- Only state what is visible in the image or stated in the caption and surrounding text.
+- Do not ask about anything you cannot read off the image.
+- Questions must name the subject, not "the figure" or "this image".
+- If the image is unreadable or carries no information, return an empty list.
+
+Schema:
+{{"pairs":[{{"question":"...","answer":"...","visual_evidence":"what in the image supports this"}}]}}
+
+""" + JSON_RULE
+
+FIGURE_GROUND = """Check whether this claim is supported by the image shown.
+
+Claim: {claim}
+Caption: {caption}
+
+"entailment" only if the image visibly supports every part of the claim.
+"contradiction" if the image shows otherwise. "neutral" if it is not readable from the image.
+
+Schema:
+{{"label":"entailment|neutral|contradiction","confidence":0.0,"unsupported":["..."]}}
+
+""" + JSON_RULE
+
+Z3_CHECK = """Encode this claim as SMT-LIB 2 constraints so a solver can check it for consistency.
+
+Question: {question}
+Answer: {answer}
+Source context (the ground truth numbers):
+---
+{context}
+---
+
+Declare the quantities from the context as constants with their real values asserted, then assert
+the claim the answer makes. A satisfiable system means the claim is consistent with the source.
+Also emit "negation", which is the same system with the claim's assertion negated — that one must
+be unsatisfiable for the claim to actually follow.
+Use only (declare-const ...), (assert ...), and Real/Int/Bool sorts. Do not include (check-sat).
+If the claim carries no checkable arithmetic or boolean structure, set "applicable" to false.
+
+Schema:
+{{"applicable":true,"constraints":"...","negation":"..."}}
+
+""" + JSON_RULE
+
 NLI_FORWARD = """Judge whether the premise entails the hypothesis.
 
 Premise:

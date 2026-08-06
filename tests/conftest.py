@@ -24,6 +24,18 @@ def scripted(prompt: str, system: str = "") -> str:
     nums = NUM.findall(ctx)
     first = nums[0] if nums else "4"
 
+    if "looking at a figure" in prompt:
+        return json.dumps(
+            {"pairs": [{"question": "How does accuracy change as SparseRoute widens from 2 to 8 experts?",
+                        "answer": "Accuracy rises steeply from 61.2 to 74.8 and then flattens at 75.1.",
+                        "visual_evidence": "the fourth bar is barely taller than the third"}]}
+        )
+    if "supported by the image" in prompt:
+        return json.dumps({"label": "entailment", "confidence": 0.88, "unsupported": []})
+    if "SMT-LIB" in prompt:
+        return json.dumps({"applicable": True,
+                           "constraints": "(declare-const a Real)(assert (= a 74.8))",
+                           "negation": "(declare-const a Real)(assert (= a 74.8))(assert (not (= a 74.8)))"})
     if "knowledge graph" in prompt:
         return json.dumps(
             {
@@ -101,9 +113,12 @@ def tree(sample_text):
     return from_markdown(sample_text, source="sample.md")
 
 
+ECHO = {"backend": "echo", "handler": scripted}
+
+
 @pytest.fixture
 def runtime() -> Runtime:
-    return Runtime({"generate": {"backend": "echo", "handler": scripted}, "verify": {"backend": "echo", "handler": scripted}})
+    return Runtime({"generate": dict(ECHO), "verify": dict(ECHO), "vision": dict(ECHO)})
 
 
 @pytest.fixture
@@ -112,8 +127,9 @@ def config(tmp_path) -> Config:
     cfg.inputs = [str(FIXTURE)]
     cfg.outdir = str(tmp_path / "out")
     cfg.cache_dir = str(tmp_path / "cache")
-    cfg.runtime.generate = {"backend": "echo", "handler": scripted}
-    cfg.runtime.verify = {"backend": "echo", "handler": scripted}
+    cfg.runtime.generate = dict(ECHO)
+    cfg.runtime.verify = dict(ECHO)
+    cfg.runtime.vision = dict(ECHO)
     cfg.runtime.workers = 1
     cfg.synth.multihop_pairs = 3
     cfg.synth.multiturn_per_doc = 2

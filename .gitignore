@@ -11,3 +11,4 @@ out/
 dataset/
 *.parquet
 .DS_Store
+tests/fixtures/sample.pdf

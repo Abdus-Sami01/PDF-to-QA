@@ -38,6 +38,11 @@ def _config(args) -> Config:
         cfg.runtime.workers = args.workers
     if getattr(args, "limit", None):
         cfg.select.target_count = args.limit
+    if getattr(args, "vision", None):
+        cfg.runtime.vision = {"backend": args.vision, **({"model": args.vision_model} if args.vision_model else {})}
+    if getattr(args, "no_figures", False):
+        cfg.assets_dir = None
+        cfg.synth.figure_qa_per_doc = 0
     if getattr(args, "offline", False):
         cfg.verify.model_gates = False
         cfg.graph.llm_extract = False
@@ -52,7 +57,7 @@ def cmd_run(args) -> int:
 
 
 def cmd_inspect(args) -> int:
-    tree = load(args.input, args.backend or "auto")
+    tree = load(args.input, args.backend or "auto", args.assets, args.dpi)
     chunks = chunk_tree(tree)
     if args.json:
         print(json.dumps({"tree": tree.as_dict(), "chunks": [c.context() for c in chunks]}, indent=2))
@@ -66,6 +71,12 @@ def cmd_inspect(args) -> int:
     print("\nchunks:")
     for c in chunks:
         print(f"  {c.id}  {c.tokens:>5}tok  p{c.prov.pages}  {c.prov.breadcrumb[:70]}")
+    rendered = [n for n in tree.root.walk() if n.attrs.get("image_path")]
+    if rendered:
+        print(f"\nrendered images: {len(rendered)}")
+        for n in rendered:
+            print(f"  {n.id}  p{n.span.page}  {n.attrs['image_width']}x{n.attrs['image_height']}  "
+                  f"{n.attrs.get('caption', '')[:50]}  {n.attrs['image_path']}")
     unresolved = [r for r in tree.references if not r.resolved]
     if unresolved:
         print(f"\nunresolved references: {len(unresolved)}")
@@ -133,6 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model")
     run.add_argument("--workers", type=int)
     run.add_argument("--limit", type=int, help="target record count after selection")
+    run.add_argument("--vision", help="vision backend for figure QA, e.g. anthropic or ollama")
+    run.add_argument("--vision-model")
+    run.add_argument("--no-figures", action="store_true", help="skip figure rendering and multimodal synthesis")
     run.add_argument("--offline", action="store_true", help="skip all LLM-dependent gates and extraction")
     run.add_argument("--no-cache", action="store_true")
     run.set_defaults(func=cmd_run)
@@ -140,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     ins = sub.add_parser("inspect", help="show the parsed AST, references, and chunk plan")
     ins.add_argument("input")
     ins.add_argument("--backend")
+    ins.add_argument("--assets", help="render figures and tables as PNG crops into this directory")
+    ins.add_argument("--dpi", type=int, default=144)
     ins.add_argument("--json", action="store_true")
     ins.set_defaults(func=cmd_inspect)
 

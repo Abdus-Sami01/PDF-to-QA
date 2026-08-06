@@ -74,6 +74,7 @@ def _breadcrumb(tree: DocumentTree, section: Node) -> str:
 def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrumb: str, overlap_headings: bool) -> Chunk:
     text_parts = []
     tables, equations, figures, refs = [], [], [], []
+    figure_refs: list[dict] = []
     node_ids, pages, bboxes = [], [], []
 
     for block in blocks:
@@ -84,11 +85,14 @@ def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrum
         if block.kind == TABLE:
             tables.append(block.attrs.get("html") or block.text)
             text_parts.append(f"[{block.id}] {block.attrs.get('caption', '')}\n{block.text}".strip())
+            if block.attrs.get("image_path"):
+                figure_refs.append(_figure_ref(block))
         elif block.kind == EQUATION:
             equations.append(block.attrs.get("latex") or block.text)
             text_parts.append(f"[{block.id}] {block.text}")
         elif block.kind == FIGURE:
             figures.append(block.attrs.get("image_path", block.id))
+            figure_refs.append(_figure_ref(block))
         else:
             text_parts.append(block.text)
         resolved = tree.resolve_context(block)
@@ -115,8 +119,22 @@ def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrum
         tables=tables,
         equations=equations,
         figures=figures,
+        figure_refs=figure_refs,
         resolved_refs="\n".join(refs),
     )
+
+
+def _figure_ref(block: Node) -> dict:
+    return {
+        "id": block.id,
+        "kind": block.kind,
+        "caption": block.attrs.get("caption", ""),
+        "page": block.span.page,
+        "bbox": list(block.span.bbox) if block.span.bbox else None,
+        "image_path": block.attrs.get("image_path", ""),
+        "width": block.attrs.get("image_width", 0),
+        "height": block.attrs.get("image_height", 0),
+    }
 
 
 def _merge_small(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[Chunk]:
@@ -131,6 +149,7 @@ def _merge_small(chunks: list[Chunk], min_tokens: int, max_tokens: int) -> list[
                 tables=prev.tables + chunk.tables,
                 equations=prev.equations + chunk.equations,
                 figures=prev.figures + chunk.figures,
+                figure_refs=prev.figure_refs + chunk.figure_refs,
                 resolved_refs="\n".join(x for x in (prev.resolved_refs, chunk.resolved_refs) if x),
             )
             out[-1] = merged

@@ -5,9 +5,10 @@ from __future__ import annotations
 import random
 
 from .graph import KnowledgeGraph, serialize_path
-from .llm import Runtime, parse_json
+from .llm import LLMError, Runtime, parse_json
 from .prompts import (
     EVOL_INSTRUCT,
+    FIGURE_QA,
     MULTIHOP_GENERATE,
     MULTITURN_GENERATE,
     MUTATIONS,
@@ -147,6 +148,42 @@ def generate_react(runtime: Runtime, chunk: Chunk) -> QARecord | None:
         tool_trace=trace,
         prov=_prov(chunk, "generate_react"),
     )
+
+
+def generate_figure_qa(runtime: Runtime, chunk: Chunk, n: int = 2) -> list[QARecord]:
+    """Multimodal pairs: the rendered figure crop is sent alongside its caption and section text."""
+    out: list[QARecord] = []
+    for fig in chunk.images():
+        prompt = FIGURE_QA.format(
+            breadcrumb=chunk.prov.breadcrumb,
+            caption=fig.get("caption") or "(no caption)",
+            context=chunk.text[:4000],
+            n=n,
+        )
+        try:
+            raw = runtime.complete_vision(prompt, [fig["image_path"]], temperature=0.7, max_tokens=1800)
+        except LLMError:
+            continue
+        data = parse_json(raw, default={}) or {}
+        for p in data.get("pairs", []) or []:
+            if not isinstance(p, dict) or not p.get("question") or not p.get("answer"):
+                continue
+            prov = _prov(chunk, "generate_figure_qa")
+            prov.node_ids = list(dict.fromkeys(prov.node_ids + [fig["id"]]))
+            if fig.get("bbox"):
+                prov.bboxes = prov.bboxes + [fig["bbox"]]
+            prov.verification.append({"stage": "visual_evidence", "note": str(p.get("visual_evidence", ""))[:300]})
+            rec = QARecord(
+                question=str(p["question"]).strip(),
+                answer=str(p["answer"]).strip(),
+                context=f"{fig.get('caption', '')}\n\n{chunk.text}".strip(),
+                task="figure_qa",
+                difficulty="intermediate",
+                images=[fig["image_path"]],
+                prov=prov,
+            )
+            out.append(rec)
+    return out
 
 
 def apply_persona(runtime: Runtime, rec: QARecord, persona: str, style: str) -> QARecord:

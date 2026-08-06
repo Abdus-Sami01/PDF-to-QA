@@ -45,12 +45,13 @@ class Pipeline:
     # ---------------------------------------------------------------- stages
 
     def parse(self, path: str | Path) -> DocumentTree:
-        key = fingerprint(file_fingerprint(path), PARSER_VERSION, self.cfg.backend)
+        assets = str(Path(self.cfg.outdir) / self.cfg.assets_dir) if self.cfg.assets_dir else None
+        key = fingerprint(file_fingerprint(path), PARSER_VERSION, self.cfg.backend, assets, self.cfg.figure_dpi)
         cached = self.store.get("ast", key)
         if cached is not None:
             self.progress("parse", {"path": str(path), "cached": True})
             return DocumentTree.from_dict(cached)
-        tree = extract.load(path, self.cfg.backend)
+        tree = extract.load(path, self.cfg.backend, assets, self.cfg.figure_dpi)
         self.store.put("ast", key, tree.as_dict())
         self.progress("parse", {"path": str(path), "nodes": len(tree.index), "refs": len(tree.references)})
         return tree
@@ -105,6 +106,12 @@ class Pipeline:
             records.extend(convos)
             self.progress("synth.multiturn", {"records": len(convos)})
 
+        if s.figure_qa_per_doc and self.runtime.has_vision():
+            picks = self._sample([c for c in chunks if c.images()], s.figure_qa_per_doc)
+            figs = self._map(lambda c: synth.generate_figure_qa(self.runtime, c), picks, flatten=True)
+            records.extend(figs)
+            self.progress("synth.figure_qa", {"records": len(figs), "chunks_with_images": len(picks)})
+
         if s.react_per_doc:
             picks = self._sample([c for c in chunks if c.tables or _has_numbers(c)], s.react_per_doc) or self._sample(chunks, s.react_per_doc)
             traces = [t for t in self._map(lambda c: synth.generate_react(self.runtime, c), picks) if t]
@@ -143,7 +150,7 @@ class Pipeline:
         if not v.enabled:
             return records
         self._map(
-            lambda r: verifier.verify(r, self.runtime, v.model_gates, v.symbolic, v.consistency_samples, v.allow_exec),
+            lambda r: verifier.verify(r, self.runtime, v.model_gates, v.symbolic, v.consistency_samples, v.allow_exec, v.z3),
             records,
         )
         kept = [r for r in records if r.accepted and r.scores.get("quality", 0.0) >= v.min_quality]
@@ -268,6 +275,7 @@ def _chunk_to_dict(c: Chunk) -> dict:
         "tables": c.tables,
         "equations": c.equations,
         "figures": c.figures,
+        "figure_refs": c.figure_refs,
         "resolved_refs": c.resolved_refs,
         "tokens": c.tokens,
         "prov": c.prov.__dict__,
@@ -282,6 +290,7 @@ def _chunk_from_dict(d: dict) -> Chunk:
         tables=d.get("tables", []),
         equations=d.get("equations", []),
         figures=d.get("figures", []),
+        figure_refs=d.get("figure_refs", []),
         resolved_refs=d.get("resolved_refs", ""),
         tokens=d.get("tokens", 0),
         id=d.get("id", ""),

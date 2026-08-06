@@ -6,8 +6,8 @@ import json
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 
-PARSER_VERSION = "2"
-PROMPT_VERSION = "2"
+PARSER_VERSION = "3"
+PROMPT_VERSION = "3"
 
 
 @dataclass
@@ -28,6 +28,7 @@ class GraphConfig:
 @dataclass
 class SynthConfig:
     qa_per_chunk: int = 3
+    figure_qa_per_doc: int = 4
     multihop_pairs: int = 8
     multihop_per_pair: int = 1
     multiturn_per_doc: int = 4
@@ -46,6 +47,7 @@ class VerifyConfig:
     enabled: bool = True
     model_gates: bool = True
     symbolic: bool = True
+    z3: bool = True
     allow_exec: bool = True
     consistency_samples: int = 0
     min_quality: float = 0.55
@@ -67,6 +69,7 @@ class RuntimeConfig:
     generate: dict = field(default_factory=lambda: {"backend": "echo"})
     verify: dict = field(default_factory=lambda: {"backend": "echo"})
     embed: dict = field(default_factory=dict)
+    vision: dict = field(default_factory=dict)
     workers: int = 4
     retries: int = 2
 
@@ -78,6 +81,8 @@ class Config:
     formats: list[str] = field(default_factory=lambda: ["chatml", "sharegpt", "dpo", "raw"])
     cache_dir: str = ".pdfqa-cache"
     cache: bool = True
+    assets_dir: str | None = "assets"
+    figure_dpi: int = 144
     seed: int = 7
     backend: str = "auto"
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
@@ -91,6 +96,8 @@ class Config:
         specs = {"generate": dict(self.runtime.generate), "verify": dict(self.runtime.verify or self.runtime.generate)}
         if self.runtime.embed:
             specs["embed"] = dict(self.runtime.embed)
+        if self.runtime.vision:
+            specs["vision"] = dict(self.runtime.vision)
         return specs
 
     def as_dict(self) -> dict:
