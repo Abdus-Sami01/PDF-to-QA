@@ -187,13 +187,14 @@ def trace_execution(rec: QARecord, timeout: float = 10.0, allow_exec: bool = Tru
         return Gate("trace_execution", True, 0.5, "execution disabled")
 
     grids = rec.tool_env.get("grids") or []
+    captions = rec.tool_env.get("captions") or []
     checked, agreed, notes = 0, 0, []
     for i, step in enumerate(rec.tool_trace):
         action = str(step.get("action", "")).strip().lower()
         if action not in ("python", "sql", "lookup"):
             notes.append(f"step {i}: unknown tool {action!r}")
             continue
-        result = execute(action, str(step.get("action_input", "")), rec.context, grids, timeout)
+        result = execute(action, str(step.get("action_input", "")), rec.context, grids, timeout, captions)
         checked += 1
         step["executed_observation"] = result.output[:600]
         step["executed_ok"] = result.ok

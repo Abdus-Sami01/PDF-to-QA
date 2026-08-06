@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import random
 
-from .graph import KnowledgeGraph, serialize_path
+from .graph import KnowledgeGraph, cross_document_pairs, serialize_path
 from .llm import LLMError, Runtime, parse_json
 from .prompts import (
+    CROSS_DOC_GENERATE,
     EVOL_INSTRUCT,
     FIGURE_QA,
     MULTIHOP_GENERATE,
@@ -21,7 +22,7 @@ from .prompts import (
     STYLES,
 )
 from .records import Chunk, Provenance, QARecord, Turn
-from .tools import execute, observations_agree
+from .tools import describe_schema, execute, observations_agree
 
 
 def _prov(chunk: Chunk, generator: str) -> Provenance:
@@ -98,10 +99,54 @@ def generate_multihop(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int = 8, pe
     return out
 
 
-def _pick_chunk(kg: KnowledgeGraph, chunk_ids) -> Chunk | None:
+def generate_cross_document(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int = 6, per_pair: int = 1, rng: random.Random | None = None) -> list[QARecord]:
+    rng = rng or random.Random(0)
+    seeds = cross_document_pairs(kg)
+    rng.shuffle(seeds)
+    out: list[QARecord] = []
+    for anchor, other, path in seeds[:n_pairs]:
+        chunk_a = _pick_chunk(kg, anchor.chunk_ids)
+        chunk_b = _pick_chunk(kg, other.chunk_ids, exclude_source=chunk_a.prov.source if chunk_a else "")
+        if chunk_a is None or chunk_b is None or chunk_a.prov.source == chunk_b.prov.source:
+            continue
+        prompt = CROSS_DOC_GENERATE.format(
+            anchor=anchor.name,
+            path=serialize_path(kg, path) or f"both documents discuss {anchor.name}",
+            source_a=chunk_a.prov.source,
+            breadcrumb_a=chunk_a.prov.breadcrumb,
+            context_a=chunk_a.context()[:5000],
+            source_b=chunk_b.prov.source,
+            breadcrumb_b=chunk_b.prov.breadcrumb,
+            context_b=chunk_b.context()[:5000],
+            n=per_pair,
+        )
+        raw = runtime.complete("generate", prompt, temperature=0.8, max_tokens=2048)
+        data = parse_json(raw, default={}) or {}
+        for p in data.get("pairs", []) or []:
+            if not isinstance(p, dict) or not p.get("question"):
+                continue
+            prov = _prov(chunk_a, "generate_cross_document").merge(_prov(chunk_b, "generate_cross_document"))
+            prov.verification.append(
+                {"stage": "cross_document", "anchor": anchor.name, "sources": [chunk_a.prov.source, chunk_b.prov.source]}
+            )
+            out.append(
+                QARecord(
+                    question=str(p["question"]).strip(),
+                    answer=str(p.get("answer", "")).strip(),
+                    context=chunk_a.context() + "\n\n---\n\n" + chunk_b.context(),
+                    task="cross_document",
+                    difficulty="complex",
+                    hops=int(p.get("hops", 2) or 2),
+                    prov=prov,
+                )
+            )
+    return out
+
+
+def _pick_chunk(kg: KnowledgeGraph, chunk_ids, exclude_source: str = "") -> Chunk | None:
     for cid in sorted(chunk_ids):
         chunk = kg.chunk_index.get(cid)
-        if chunk is not None:
+        if chunk is not None and (not exclude_source or chunk.prov.source != exclude_source):
             return chunk
     return None
 
@@ -133,8 +178,29 @@ def generate_multiturn(runtime: Runtime, chunk: Chunk, persona: str = "practitio
     )
 
 
-def generate_react(runtime: Runtime, chunk: Chunk) -> QARecord | None:
-    prompt = REACT_GENERATE.format(breadcrumb=chunk.prov.breadcrumb, context=chunk.context()[:8000])
+def table_registry(chunks: list[Chunk], local: Chunk | None = None) -> tuple[list, list]:
+    """Every table in the document, the local chunk's first so it stays `t` in SQL."""
+    seen: set[str] = set()
+    grids, captions = [], []
+    ordered = ([local] if local else []) + [c for c in chunks if local is None or c.id != local.id]
+    for chunk in ordered:
+        for i, grid in enumerate(chunk.grids):
+            key = repr(grid[:1])
+            if key in seen:
+                continue
+            seen.add(key)
+            grids.append(grid)
+            captions.append(chunk.figure_refs[i]["caption"] if i < len(chunk.figure_refs) else chunk.prov.breadcrumb)
+    return grids, captions
+
+
+def generate_react(runtime: Runtime, chunk: Chunk, corpus: list[Chunk] | None = None) -> QARecord | None:
+    grids, captions = table_registry(corpus or [chunk], chunk)
+    prompt = REACT_GENERATE.format(
+        breadcrumb=chunk.prov.breadcrumb,
+        context=chunk.context()[:8000],
+        schema=describe_schema(grids, captions),
+    )
     raw = runtime.complete("generate", prompt, temperature=0.7, max_tokens=2500)
     data = parse_json(raw, default={}) or {}
     trace = [t for t in (data.get("trace") or []) if isinstance(t, dict) and t.get("action")]
@@ -147,7 +213,7 @@ def generate_react(runtime: Runtime, chunk: Chunk) -> QARecord | None:
         task="react",
         difficulty="complex",
         tool_trace=trace,
-        tool_env={"grids": chunk.grids},
+        tool_env={"grids": grids, "captions": captions},
         prov=_prov(chunk, "generate_react"),
     )
 
@@ -160,12 +226,13 @@ def repair_trace(rec: QARecord, timeout: float = 10.0) -> QARecord:
     if not rec.tool_trace:
         return rec
     grids = rec.tool_env.get("grids") or []
+    captions = rec.tool_env.get("captions") or []
     repaired = 0
     for step in rec.tool_trace:
         action = str(step.get("action", "")).strip().lower()
         if action not in ("python", "sql", "lookup"):
             continue
-        result = execute(action, str(step.get("action_input", "")), rec.context, grids, timeout)
+        result = execute(action, str(step.get("action_input", "")), rec.context, grids, timeout, captions)
         if not result.ok:
             continue
         claimed = str(step.get("observation", ""))

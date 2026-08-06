@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 
 PARSER_VERSION = "4"
-PROMPT_VERSION = "4"
+PROMPT_VERSION = "5"
 
 
 @dataclass
@@ -31,6 +31,7 @@ class SynthConfig:
     figure_qa_per_doc: int = 4
     multihop_pairs: int = 8
     multihop_per_pair: int = 1
+    cross_doc_pairs: int = 6
     multiturn_per_doc: int = 4
     multiturn_length: int = 6
     react_per_doc: int = 3

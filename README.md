@@ -33,10 +33,18 @@ in the tree. When a chunk says "as shown in Table 2", the generator sees Table 2
 mid-equation. Each chunk keeps its breadcrumb (`Doc > Section 3 > Subsection 3.2`), its page
 numbers, and its source node ids.
 
-**A graph across the whole document.** Entities, methods, datasets, claims and quantities get
-extracted into a document-level knowledge graph before any question is written. Multi-hop
-questions are then sampled from entity pairs that are graph-connected but live in *different*
-sections — so answering genuinely requires combining two places in the paper.
+**A graph across the whole document, then across the corpus.** Entities, methods, datasets, claims
+and quantities get extracted into a document-level knowledge graph before any question is written.
+Surface variants are folded together — spacing and punctuation (`Sparse-Route` / `sparse route`),
+plurals, and acronyms matched to their expansion (`SRN` → `Sparse Routing Network`) — so one concept
+is one node. Multi-hop questions are then sampled from entity pairs that are graph-connected but
+live in *different* sections, so answering requires combining two places in the paper.
+
+Run more than one document and the per-document graphs merge into a corpus graph. Any concept that
+turns up in two papers becomes a cross-document seed: the generator gets a chunk from each source
+and is told to compare, reconcile, or flag disagreement — attributing each fact to the document it
+came from. On the bundled fixtures that produces, unprompted, a question about the two papers
+reporting 74.8 and 72.9 for the same configuration and why they differ.
 
 **Several data shapes, not just Q&A:**
 
@@ -44,6 +52,7 @@ sections — so answering genuinely requires combining two places in the paper.
 | --- | --- |
 | `qa` | Single-hop grounded pairs, mixed difficulty |
 | `multihop` | Questions requiring two disjoint sections, sampled via KG paths |
+| `cross_document` | Questions spanning two source documents that share a concept |
 | `multiturn` | Dialogue trees with follow-ups, clarification, and corrected user misassumptions |
 | `figure_qa` | Multimodal pairs — the rendered figure crop is sent to a vision model with its caption and section text |
 | `react` | Tool-calling traces whose observations are actually executed, not asserted |
@@ -56,9 +65,11 @@ implicit phrasing.
 
 **Tool traces are executed, not trusted.** A model asked to write a ReAct trace will happily invent
 the observation it wishes it had got. So every action gets replayed: `python` runs in the sandbox,
-`sql` runs against a real in-memory SQLite table built from the extracted table grid (header row
-becomes sanitised columns, cells get typed so `max(accuracy) - min(accuracy)` actually works,
-read-only queries only), and `lookup` searches the source. Claimed observations are compared to the
+`sql` runs against real in-memory SQLite tables built from **every** table in the document — header
+rows become sanitised columns (`Latency (ms)` → `latency_ms`), cells get typed so
+`max(accuracy) - min(accuracy)` actually works, captions become readable aliases (`table_1`), and
+joins across two tables in different sections are allowed. The schema is written into the prompt,
+so the model queries columns that exist. Read-only `SELECT`/`WITH` only. `lookup` searches the source. Claimed observations are compared to the
 real ones with numeric tolerance. Mismatches get **repaired** — the real output replaces the invented
 one and the original is kept in provenance — and steps whose tool genuinely errored are left alone
 so the gate still rejects them.

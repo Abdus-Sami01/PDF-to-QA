@@ -52,31 +52,60 @@ def _cast(value: str):
         return text
 
 
-def load_tables(grids: list[list[list[str]]]) -> sqlite3.Connection:
-    """Header row becomes columns; every other row becomes a row of `t` (or t2, t3, ... for extras)."""
+def table_name(caption: str, index: int, taken: set[str]) -> str:
+    """`t` is always the first table; captions also get a readable alias like table_1."""
+    if index == 0:
+        taken.add("t")
+        return "t"
+    m = re.match(r"\s*(table|figure)\s*(\d{1,3}[a-z]?)", caption.strip(), re.I)
+    if m:
+        name = f"{m.group(1).lower()}_{m.group(2).lower()}"
+        if name not in taken:
+            taken.add(name)
+            return name
+    name = f"t{index + 1}"
+    taken.add(name)
+    return name
+
+
+def load_tables(grids: list[list[list[str]]], captions: list[str] | None = None) -> tuple[sqlite3.Connection, dict[str, list[str]]]:
+    """Header row becomes columns; returns the connection plus the schema actually created."""
     conn = sqlite3.connect(":memory:")
+    captions = captions or []
+    schema: dict[str, list[str]] = {}
+    taken_names: set[str] = set()
     for i, grid in enumerate(grids):
         if len(grid) < 2:
             continue
-        name = "t" if i == 0 else f"t{i + 1}"
+        name = table_name(captions[i] if i < len(captions) else "", len(schema), taken_names)
         taken: set[str] = set()
         cols = [column_name(c, j, taken) for j, c in enumerate(grid[0])]
-        conn.execute(f"CREATE TABLE {name} ({', '.join(f'{c}' for c in cols)})")
+        conn.execute(f"CREATE TABLE {name} ({', '.join(cols)})")
         placeholders = ",".join("?" * len(cols))
         for row in grid[1:]:
             padded = (list(row) + [""] * len(cols))[: len(cols)]
             conn.execute(f"INSERT INTO {name} VALUES ({placeholders})", [_cast(c) for c in padded])
+        schema[name] = cols
     conn.commit()
-    return conn
+    return conn, schema
 
 
-def run_sql(query: str, grids: list[list[list[str]]], limit: int = 50) -> ToolResult:
+def describe_schema(grids: list[list[list[str]]], captions: list[str] | None = None) -> str:
+    """The model cannot write valid SQL without knowing the tables; this goes into the prompt."""
+    if not grids:
+        return "(no tables in scope)"
+    conn, schema = load_tables(grids, captions)
+    conn.close()
+    return "\n".join(f"{name}({', '.join(cols)})" for name, cols in schema.items()) or "(no tables in scope)"
+
+
+def run_sql(query: str, grids: list[list[list[str]]], limit: int = 50, captions: list[str] | None = None) -> ToolResult:
     if SQL_FORBIDDEN.search(query) or not SELECT_ONLY.match(query):
         return ToolResult(False, "only read-only SELECT queries are allowed", "sql")
     if not grids:
         return ToolResult(False, "no table available in this context", "sql")
     try:
-        conn = load_tables(grids)
+        conn, _ = load_tables(grids, captions)
     except sqlite3.Error as exc:
         return ToolResult(False, f"table load failed: {exc}", "sql")
     try:
@@ -105,7 +134,14 @@ def run_lookup(term: str, context: str, window: int = 320) -> ToolResult:
     return ToolResult(True, context[start : start + window].strip(), "lookup")
 
 
-def execute(action: str, action_input: str, context: str = "", grids: list[list[list[str]]] | None = None, timeout: float = 10.0) -> ToolResult:
+def execute(
+    action: str,
+    action_input: str,
+    context: str = "",
+    grids: list[list[list[str]]] | None = None,
+    timeout: float = 10.0,
+    captions: list[str] | None = None,
+) -> ToolResult:
     from .verify import run_python
 
     action = (action or "").strip().lower()
@@ -113,7 +149,7 @@ def execute(action: str, action_input: str, context: str = "", grids: list[list[
         ok, out = run_python(action_input, timeout)
         return ToolResult(ok, out, "python")
     if action == "sql":
-        return run_sql(action_input, grids or [])
+        return run_sql(action_input, grids or [], captions=captions)
     if action == "lookup":
         return run_lookup(action_input, context)
     return ToolResult(False, f"unknown tool: {action}", action)

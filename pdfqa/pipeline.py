@@ -13,7 +13,7 @@ from .cache import Store, file_fingerprint, fingerprint
 from .chunking import chunk_tree
 from .config import PARSER_VERSION, PROMPT_VERSION, Config
 from .docast import DocumentTree
-from .graph import KnowledgeGraph, build_graph
+from .graph import KnowledgeGraph, build_graph, merge_graphs
 from .llm import Runtime
 from .records import Chunk, Provenance, QARecord
 from .select import (
@@ -114,7 +114,7 @@ class Pipeline:
 
         if s.react_per_doc:
             picks = self._sample([c for c in chunks if c.tables or _has_numbers(c)], s.react_per_doc) or self._sample(chunks, s.react_per_doc)
-            traces = [t for t in self._map(lambda c: synth.generate_react(self.runtime, c), picks) if t]
+            traces = [t for t in self._map(lambda c: synth.generate_react(self.runtime, c, chunks), picks) if t]
             if s.repair_traces:
                 self._map(synth.repair_trace, traces)
             records.extend(traces)
@@ -149,6 +149,17 @@ class Pipeline:
         extra.extend(evolved)
         self.progress("synth.evol", {"records": len(evolved)})
         return extra
+
+    def cross_document(self, graphs: list[KnowledgeGraph], chunks: list[Chunk]) -> list[QARecord]:
+        """Only meaningful once two documents share an entity, so it no-ops on a single input."""
+        n = self.cfg.synth.cross_doc_pairs
+        if n <= 0 or len(graphs) < 2:
+            return []
+        corpus = merge_graphs(graphs, chunks)
+        self.report["corpus_graph"] = corpus.stats() | corpus.meta
+        records = synth.generate_cross_document(self.runtime, corpus, n, self.cfg.synth.multihop_per_pair, self.rng)
+        self.progress("synth.cross_document", {"records": len(records), "documents": len(graphs)})
+        return records
 
     def preference_pairs(self, records: list[QARecord]) -> None:
         ratio = self.cfg.synth.dpo_ratio
@@ -196,6 +207,8 @@ class Pipeline:
         if not paths:
             raise ValueError("no inputs given")
         all_records: list[QARecord] = []
+        graphs: list[KnowledgeGraph] = []
+        corpus_chunks: list[Chunk] = []
 
         for path in _expand(paths):
             tree = self.parse(path)
@@ -206,7 +219,10 @@ class Pipeline:
                 {"source": tree.source, "chunks": len(chunks), "graph": kg.stats(), "generated": len(records)}
             )
             all_records.extend(records)
+            graphs.append(kg)
+            corpus_chunks.extend(chunks)
 
+        all_records.extend(self.cross_document(graphs, corpus_chunks))
         self.preference_pairs(all_records)
         kept = self.verify(all_records)
         kept = self.select(kept)

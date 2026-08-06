@@ -47,6 +47,13 @@ def scripted(prompt: str, system: str = "") -> str:
                 "relations": [{"source": "SparseRoute", "relation": "evaluated_on", "target": "RetrievalBench"}],
             }
         )
+    if "two different documents" in prompt:
+        return json.dumps(
+            {"pairs": [{"question": "Do the routing study and the latency re-evaluation agree on SparseRoute k=4 accuracy on RetrievalBench?",
+                        "answer": "No. The original study reports 74.8 accuracy while the latency re-evaluation measures 72.9, "
+                                  "because the second includes router overhead in its end-to-end measurement.",
+                        "hops": 2, "evidence_a": "74.8", "evidence_b": "72.9"}]}
+        )
     if "multi-hop questions" in prompt:
         return json.dumps(
             {"pairs": [{"question": "How does the router configuration in the method section relate to the reported accuracy?",

@@ -63,6 +63,33 @@ Schema:
 
 """ + JSON_RULE
 
+CROSS_DOC_GENERATE = """You write questions that require reading two different documents.
+
+Shared concept linking them: {anchor}
+Graph link: {path}
+
+Document A — {source_a} ({breadcrumb_a}):
+---
+{context_a}
+---
+
+Document B — {source_b} ({breadcrumb_b}):
+---
+{context_b}
+---
+
+Write {n} questions that compare, reconcile, or combine what the two documents say.
+Rules:
+- Name the documents by their subject matter, not as "Document A" or "the second paper".
+- The answer must attribute each fact to the document it came from.
+- If the two documents disagree, say so explicitly rather than picking one.
+- A reader holding only one of the two must be unable to answer.
+
+Schema:
+{{"pairs":[{{"question":"...","answer":"...","hops":2,"evidence_a":"...","evidence_b":"..."}}]}}
+
+""" + JSON_RULE
+
 MULTITURN_GENERATE = """Write a realistic multi-turn conversation grounded in one source section.
 
 Persona: {persona}
@@ -94,8 +121,13 @@ Source context:
 
 Available tools:
 - python(code): executes Python, returns stdout. Use for arithmetic and unit conversion.
-- sql(query): runs SQL over a table named `t` loaded from a table in the context.
+- sql(query): read-only SQLite over the tables extracted from this document. Schema:
+{schema}
 - lookup(term): returns the passage of the source document mentioning the term.
+
+Query only tables and columns listed in the schema above; the query is really executed and a
+wrong column name fails the trace. Joining two tables is allowed and encouraged when it answers
+something neither table answers alone.
 
 Write one question that genuinely needs computation or a table query, then the trajectory.
 Every observation must be the true result of the given action against the real context.
