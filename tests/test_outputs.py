@@ -142,3 +142,44 @@ def test_directory_expansion_picks_up_every_supported_suffix(tmp_path):
     found = _expand([str(tmp_path / "docs")])
     assert found and all(p.suffix.lower() in supported() for p in found)
     assert not any(p.suffix == ".rtf" for p in found)
+
+
+# ------------------------------------------------------------------ per-shape yield
+
+
+SHAPES = ("qa", "multihop", "multiturn", "react", "cross_document")
+
+
+def test_every_generated_shape_reaches_the_dataset(config):
+    """multiturn once vanished entirely — generated at full model cost, rejected by every gate,
+    and invisible in the report because a missing key looks the same as a shape nobody asked for."""
+    config.inputs = [str(FIXTURES / "sample.md"), str(FIXTURES / "sample2.md")]
+    config.formats = ["raw"]
+    tasks = Pipeline(config).run()["stats"]["task"]
+
+    missing = [shape for shape in SHAPES if tasks.get(shape, 0) == 0]
+    assert not missing, f"shapes generated but yielding nothing: {missing}"
+
+
+def test_verification_does_not_reject_almost_everything(config):
+    """A canary on gate calibration: a gate tightened too far shows up here, not in production."""
+    from collections import Counter
+
+    config.inputs = [str(FIXTURES / "sample.md"), str(FIXTURES / "sample2.md")]
+    config.formats = ["raw"]
+    pipeline = Pipeline(config)
+
+    generated, graphs, chunks = [], [], []
+    for path in config.inputs:
+        tree = pipeline.parse(path)
+        doc_chunks = pipeline.chunk(tree)
+        graph = pipeline.graph(doc_chunks)
+        generated += pipeline.synthesize(doc_chunks, graph)
+        graphs.append(graph)
+        chunks += doc_chunks
+    generated += pipeline.cross_document(graphs, chunks)
+    kept = pipeline.verify(generated)
+
+    assert len(kept) / len(generated) > 0.3, Counter(
+        flag for record in generated for flag in record.flags
+    )

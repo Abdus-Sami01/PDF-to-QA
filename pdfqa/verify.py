@@ -61,7 +61,14 @@ def generated_text(rec: QARecord) -> str:
 # --------------------------------------------------------------------------- cheap gates
 
 
-def lexical_grounding(rec: QARecord, threshold: float = 0.45) -> Gate:
+def lexical_grounding(rec: QARecord, threshold: float = 0.25) -> Gate:
+    """A coarse topic-drift filter, deliberately not a precision check.
+
+    Token overlap cannot separate faithful from unfaithful once an answer reuses the context's
+    vocabulary — a wrong claim built from the right words scores higher than a faithful but wordy
+    one. Set high, it becomes a verbosity filter that discards good data; the precise work belongs
+    to `numeric_grounding` (wrong figures) and `nli_forward` (contradictions).
+    """
     ans, ctx = set(tokens(generated_text(rec))), set(tokens(rec.context))
     if not ans:
         return Gate("lexical_grounding", False, 0.0, "empty answer")
@@ -69,10 +76,21 @@ def lexical_grounding(rec: QARecord, threshold: float = 0.45) -> Gate:
     return Gate("lexical_grounding", overlap >= threshold, overlap, f"{len(ans & ctx)}/{len(ans)} answer tokens in context")
 
 
+def supported_numbers(rec: QARecord) -> list[float]:
+    """Numbers the record may legitimately state: those in the source, plus any a tool actually
+    computed. A ReAct trace exists to derive figures the text does not contain, and an executed
+    observation is stronger evidence than finding the digits in the prose."""
+    values = [float(x) for x in NUMBER.findall(rec.context)]
+    for step in rec.tool_trace:
+        if step.get("executed_ok"):
+            values += [float(x) for x in NUMBER.findall(str(step.get("executed_observation", "")))]
+    return values
+
+
 def numeric_grounding(rec: QARecord) -> Gate:
-    """Every number in the answer must appear in the source, allowing for rounding."""
+    """Every number in the answer must be in the source or computed by a verified tool call."""
     ans_nums = [float(x) for x in NUMBER.findall(generated_text(rec))]
-    ctx_nums = [float(x) for x in NUMBER.findall(rec.context)]
+    ctx_nums = supported_numbers(rec)
     if not ans_nums:
         return Gate("numeric_grounding", True, 1.0, "no numbers")
     missing = []
@@ -373,11 +391,13 @@ def verify(
 ) -> QARecord:
     """Figure-derived rows swap text grounding for visual grounding — their numbers are read off axes."""
     visual = rec.task == "figure_qa" and bool(rec.images)
-    gates: list[Gate] = [g(rec) for g in (VISUAL_CHEAP_GATES if visual else CHEAP_GATES)]
+    gates: list[Gate] = []
+    if rec.tool_trace:
+        # Runs first so the numeric gate can credit figures a tool actually computed.
+        gates.append(trace_execution(rec, allow_exec=allow_exec))
+    gates += [g(rec) for g in (VISUAL_CHEAP_GATES if visual else CHEAP_GATES)]
     if rec.turns:
         gates.append(turn_coherence(rec))
-    if rec.tool_trace:
-        gates.append(trace_execution(rec, allow_exec=allow_exec))
     if use_model_gates and runtime is not None and all(g.passed for g in gates):
         if visual:
             gates.append(visual_grounding(runtime, rec))

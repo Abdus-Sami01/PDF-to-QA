@@ -116,7 +116,9 @@ so the gate still rejects them.
 
 - *Forward NLI* — is the answer entailed by the source
 - *Reverse NLI* — could the question be answered *without* the source (kills general-knowledge leakage)
-- *Numeric grounding* — every number in the answer traced back to the source, with rounding tolerance
+- *Numeric grounding* — every number in the answer traced back to the source (with rounding
+  tolerance) **or** to a figure a tool actually computed, since a ReAct trace exists to derive
+  numbers the text does not contain
 - *Shortcut detection* — rejects questions that already contain their own answer tokens
 - *Symbolic check* — quantitative claims get compiled to Python and executed in a restricted
   subprocess
@@ -128,6 +130,11 @@ so the gate still rejects them.
 
 Figure-derived rows take a different route: text grounding would falsely reject numbers read off
 an axis, so they're checked against the rendered crop by a vision model instead.
+
+Gates are layered deliberately. Lexical overlap is a coarse topic-drift filter, not a precision
+check: once an answer reuses the source's vocabulary, a wrong claim built from the right words
+scores *higher* than a faithful but wordy one, so a high threshold just penalises verbosity and
+discards good data. Precision is `numeric_grounding`'s and `nli_forward`'s job.
 
 Dialogues are graded on **every** assistant turn, not just the last one. A multi-turn record's
 `answer` field holds only the final turn, which is frequently a one-line correction ("No — the

@@ -212,3 +212,31 @@ def test_multiturn_records_survive_verification(runtime, tree):
             verify(record, runtime)
             accepted += record.accepted
     assert accepted > 0
+
+
+def test_numeric_grounding_credits_a_verified_tool_computation():
+    """A ReAct trace exists to derive figures the text does not contain."""
+    from pdfqa.verify import numeric_grounding, verify
+
+    rec = react(
+        [{"thought": "subtract", "action": "python", "action_input": "print(74.8 - 61.2)", "observation": "13.6"}],
+        answer="The routed variant improves accuracy by 13.6 points.",
+        context="SparseRoute reaches 74.8 accuracy against the dense baseline's 61.2.",
+    )
+    assert not numeric_grounding(rec).passed, "13.6 is absent from the source, as expected"
+
+    verify(rec, runtime=None, use_model_gates=False)
+    assert rec.scores["numeric_grounding"] == 1.0
+    assert "reject:numeric_grounding" not in rec.flags
+
+
+def test_a_number_no_tool_produced_is_still_rejected():
+    from pdfqa.verify import verify
+
+    rec = react(
+        [{"thought": "subtract", "action": "python", "action_input": "print(74.8 - 61.2)", "observation": "13.6"}],
+        answer="The routed variant improves accuracy by 99.9 points.",
+        context="SparseRoute reaches 74.8 accuracy against the dense baseline's 61.2.",
+    )
+    verify(rec, runtime=None, use_model_gates=False)
+    assert "reject:numeric_grounding" in rec.flags

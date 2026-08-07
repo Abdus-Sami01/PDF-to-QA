@@ -122,17 +122,16 @@ def scripted(prompt: str, system: str = "") -> str:
     if "executable Python" in prompt:
         return json.dumps({"applicable": True, "code": "print('PASS')", "expected": "PASS"})
     if "question-answer pairs" in prompt:
+        # Answer from the context supplied, the way a real model would. Canned answers are
+        # ungrounded for most chunks, so the gates reject them and the qa path goes untested.
+        facts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", ctx) if len(s.split()) > 5][:3]
+        facts = facts or [ctx.strip()[:200]]
+        topic = _between(prompt, "Section:", "\n") or "the described system"
         return json.dumps(
             {"pairs": [
-                {"question": "How many experts does the SparseRoute router select per token?",
-                 "answer": "The router selects 4 of 32 expert blocks per token, with routing temperature 0.7.",
-                 "difficulty": "simple", "evidence": "selects 4 of 32 expert blocks per token"},
-                {"question": "What accuracy does SparseRoute reach on the RetrievalBench held-out split?",
-                 "answer": f"It reaches {first} accuracy on the held-out split of RetrievalBench.",
-                 "difficulty": "intermediate", "evidence": first},
-                {"question": "What training schedule was used for the reported RetrievalBench results?",
-                 "answer": "Training ran for 12 epochs at learning rate 3e-4 with batch size 256 on 8 A100 GPUs.",
-                 "difficulty": "intermediate", "evidence": "12 epochs"},
+                {"question": f"What does {topic} specify about its reported configuration?",
+                 "answer": fact[:300], "difficulty": "simple" if i else "intermediate", "evidence": fact[:120]}
+                for i, fact in enumerate(facts)
             ]}
         )
     return json.dumps({"pairs": []})
