@@ -79,6 +79,7 @@ def _meta(rec: QARecord) -> dict:
         "quality": rec.scores.get("quality", 0.0),
         "source": rec.prov.source,
         "pages": rec.prov.pages,
+        "anchors": rec.prov.anchors,
         "node_ids": rec.prov.node_ids,
         "breadcrumb": rec.prov.breadcrumb,
     }
@@ -178,6 +179,7 @@ def write_corpus(chunks: list[Chunk], path: str | Path) -> str:
                 "section_path": c.prov.section_path,
                 "source": c.prov.source,
                 "pages": c.prov.pages,
+                "anchors": c.prov.anchors,
                 "node_ids": c.prov.node_ids,
                 "tokens": c.tokens,
                 "tables": c.tables,

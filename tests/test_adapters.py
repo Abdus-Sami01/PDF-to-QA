@@ -189,6 +189,63 @@ def test_csv_handles_tab_separated_input():
     assert tree.nodes([TABLE])[0].attrs["grid"] == [["a", "b"], ["1", "2"]]
 
 
+# ------------------------------------------------------------------ anchors
+
+
+def test_html_blocks_carry_element_ids_as_anchors():
+    tree = from_html(
+        '<html><body><h1 id="intro">Routing</h1><p id="p1">First body.</p><p>Second body.</p></body></html>',
+        "doc.html",
+    )
+    anchors = [n.span.anchor for n in tree.root.walk() if n.kind != "document"]
+    assert anchors[0] == "#intro"
+    assert anchors[1] == "#p1"
+    assert anchors[2].startswith("#b")
+
+
+def test_anchors_are_unique_within_a_document(docs):
+    anchors = [n.span.anchor for n in load(docs["html"]).root.walk() if n.span.anchor]
+    assert len(anchors) == len(set(anchors))
+
+
+def test_epub_anchors_name_the_spine_file(docs):
+    anchors = [n.span.anchor for n in load(docs["epub"]).root.walk() if n.span.anchor]
+    assert anchors and all(a.startswith("c1.xhtml#") for a in anchors)
+
+
+def test_pageless_formats_do_not_claim_page_zero(docs):
+    chunks = chunk_tree(load(docs["html"]), max_tokens=300)
+    assert chunks
+    assert all(c.prov.pages == [] for c in chunks)
+    assert any(c.prov.anchors for c in chunks)
+
+
+def test_citation_uses_an_anchor_when_there_is_no_page(docs):
+    from pdfqa.retrieve import Index
+
+    passage = Index.from_chunks(chunk_tree(load(docs["html"]), max_tokens=300)).passages[0]
+    citation = passage.citation()
+    assert citation.startswith("doc.html #")
+
+
+def test_anchors_reach_the_exported_corpus(docs, tmp_path):
+    import json
+
+    from pdfqa.export import write_corpus
+
+    path = write_corpus(chunk_tree(load(docs["html"]), max_tokens=300), tmp_path / "corpus.jsonl")
+    rows = [json.loads(l) for l in Path(path).read_text().splitlines()]
+    assert any(r["anchors"] for r in rows)
+
+
+def test_anchors_survive_a_tree_round_trip(docs):
+    from pdfqa.docast import DocumentTree
+
+    tree = load(docs["html"])
+    clone = DocumentTree.from_dict(tree.as_dict())
+    assert [n.span.anchor for n in clone.root.walk()] == [n.span.anchor for n in tree.root.walk()]
+
+
 # ------------------------------------------------------------------ downstream
 
 

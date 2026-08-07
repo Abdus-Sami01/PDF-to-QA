@@ -233,6 +233,7 @@ def _from_pymupdf(path: Path, assets_dir: str | Path | None = None, dpi: int = 1
         page_dict = page.get_text("dict")
         page_blocks: list[dict] = []
         images: list[dict] = []
+        fragments: list[dict] = []
         for block in page_dict.get("blocks", []):
             if block.get("type") != 0:
                 bbox = tuple(block.get("bbox", (0, 0, 0, 0)))
@@ -246,6 +247,12 @@ def _from_pymupdf(path: Path, assets_dir: str | Path | None = None, dpi: int = 1
                 for s in line.get("spans", []):
                     sizes.append(round(s.get("size", 0.0), 1))
                     bold += 1 if "bold" in s.get("font", "").lower() else 0
+                    sx0, sy0, sx1, sy1 = s.get("bbox", (0.0, 0.0, 0.0, 0.0))
+                    if s.get("text", "").strip():
+                        fragments.append(
+                            {"x0": sx0, "x1": sx1, "y0": sy0, "y1": sy1, "order": sy0,
+                             "height": max(1.0, sy1 - sy0), "text": s["text"].strip()}
+                        )
             body = "\n".join(lines).strip()
             if not body:
                 continue
@@ -259,6 +266,11 @@ def _from_pymupdf(path: Path, assets_dir: str | Path | None = None, dpi: int = 1
                     "bold": bold > 0,
                 }
             )
+        found = [t["bbox"] for t in page_tables]
+        for extra in detect_tables_by_alignment(fragments, pno):
+            if not any(_intersect_area(extra["bbox"], b) / max(1.0, _area(extra["bbox"])) > 0.3 for b in found):
+                page_tables.append(extra)
+                found.append(extra["bbox"])
         images.extend(_vector_regions(page, pno))
         figures = _reject_table_overlap(_cluster_regions(images, _cluster_gap(page_blocks)), [t["bbox"] for t in page_tables])
         consumed = _absorb_labels(figures, page_blocks)
@@ -451,10 +463,13 @@ def _from_pdfminer(path: Path, assets_dir: str | Path | None = None, dpi: int = 
     if assets:
         assets.mkdir(parents=True, exist_ok=True)
     raw: list[dict] = []
+    tables: list[dict] = []
+    _page_sizes: dict[int, tuple] = {}
 
     for pno, layout in enumerate(extract_pages(str(path))):
         page_blocks: list[dict] = []
         images: list[dict] = []
+        text_lines: list[dict] = []
 
         def visit(container):
             for element in container:
@@ -472,6 +487,13 @@ def _from_pdfminer(path: Path, assets_dir: str | Path | None = None, dpi: int = 
                     continue
                 sizes = [round(c.size, 1) for line in element for c in line if isinstance(c, LTChar)]
                 fonts = [c.fontname.lower() for line in element for c in line if isinstance(c, LTChar)]
+                for line in element:
+                    lx0, ly0, lx1, ly1 = line.bbox
+                    for cx0, cx1, cell_text in _line_cells(line):
+                        text_lines.append(
+                            {"x0": cx0, "x1": cx1, "y0": ly0, "y1": ly1, "order": -ly1,
+                             "height": max(1.0, ly1 - ly0), "text": cell_text}
+                        )
                 page_blocks.append(
                     {
                         "kind": "text",
@@ -484,9 +506,16 @@ def _from_pdfminer(path: Path, assets_dir: str | Path | None = None, dpi: int = 
                 )
 
         visit(layout)
+        _page_sizes[pno] = (layout.bbox[2], layout.bbox[3])
+        page_tables = detect_tables_by_alignment(text_lines, pno)
+        table_regions = _table_regions(page_tables)
+        page_blocks = [b for b in page_blocks if not _inside(b, table_regions)]
+        images = [b for b in images if not _inside(b, table_regions)]
         figures = _cluster_regions(images, _cluster_gap(page_blocks))
+        figures = _reject_table_overlap(figures, [t["bbox"] for t in page_tables])
         consumed = _absorb_labels(figures, page_blocks)
         page_blocks = [b for b in page_blocks if id(b) not in consumed]
+        tables.extend(page_tables)
         if assets:
             page_size = (layout.bbox[2], layout.bbox[3])
             for i, fig in enumerate(figures):
@@ -495,7 +524,134 @@ def _from_pdfminer(path: Path, assets_dir: str | Path | None = None, dpi: int = 
         page_blocks.sort(key=lambda b: (-round(b["bbox"][3], 1), b["bbox"][0]))
         raw.extend(page_blocks)
 
-    return _assemble(raw, [], source=path.name, title=_pdf_title(raw, path))
+    if assets:
+        for tbl in tables:
+            page_size = _page_sizes.get(tbl["page"], (612.0, 792.0))
+            render_region(path, tbl["page"], tbl["bbox"], page_size, assets / f"p{tbl['page']:03d}-tbl.png", dpi, tbl)
+    return _assemble(raw, tables, source=path.name, title=_pdf_title(raw, path))
+
+
+CELL_GAP_RATIO = 1.6
+COLUMN_TOLERANCE = 8.0
+MIN_TABLE_ROWS = 2
+
+
+def _line_cells(line) -> list[tuple[float, float, str]]:
+    """Split one visual line into cells at whitespace gaps wider than normal inter-word spacing."""
+    from pdfminer.layout import LTAnno, LTChar  # type: ignore
+
+    chars = [c for c in line if isinstance(c, LTChar)]
+    if not chars:
+        return []
+    widths = sorted(c.width for c in chars if c.width > 0)
+    if not widths:
+        return []
+    typical = widths[len(widths) // 2]
+    threshold = max(typical * CELL_GAP_RATIO, 3.0)
+
+    cells: list[list] = [[chars[0].x0, chars[0].x1, chars[0].get_text()]]
+    for prev, cur in zip(chars, chars[1:]):
+        if cur.x0 - prev.x1 > threshold:
+            cells.append([cur.x0, cur.x1, cur.get_text()])
+        else:
+            cells[-1][1] = cur.x1
+            cells[-1][2] += cur.get_text()
+    return [(x0, x1, text.strip()) for x0, x1, text in cells if text.strip()]
+
+
+def _aligned(rows: list[list[tuple[float, float, str]]]) -> bool:
+    """Real columns start at the same x on every row; prose that happens to have gaps does not."""
+    width = min(len(r) for r in rows)
+    if width < 2:
+        return False
+    aligned_columns = 0
+    for col in range(width):
+        starts = [r[col][0] for r in rows]
+        spread = max(starts) - min(starts)
+        ends = [r[col][1] for r in rows]
+        right_spread = max(ends) - min(ends)
+        if spread <= COLUMN_TOLERANCE or right_spread <= COLUMN_TOLERANCE:
+            aligned_columns += 1
+    return aligned_columns >= max(2, width - 1)
+
+
+def _rows_from_fragments(fragments: list[dict]) -> list[dict]:
+    """Group cell fragments into visual rows by vertical overlap.
+
+    A cell may be its own text object (PDF writers often place them individually) or one of several
+    gap-separated cells inside a single line, so rows have to be rebuilt from fragments either way.
+    Fragments carry `order`, which always increases down the page — PyMuPDF's y axis points down and
+    pdfminer's points up, and getting that backwards silently reverses every table's rows.
+    """
+    rows: list[dict] = []
+    for frag in sorted(fragments, key=lambda f: (f["order"], f["x0"])):
+        placed = False
+        for row in rows:
+            if abs(row["order"] - frag["order"]) <= max(3.0, frag["height"] * 0.6):
+                row["cells"].append(frag)
+                row["order"] = sum(c["order"] for c in row["cells"]) / len(row["cells"])
+                placed = True
+                break
+        if not placed:
+            rows.append({"order": frag["order"], "cells": [frag]})
+
+    out = []
+    for row in rows:
+        cells = sorted(row["cells"], key=lambda c: c["x0"])
+        out.append(
+            {
+                "order": row["order"],
+                "height": max(c["height"] for c in cells),
+                "bbox": (min(c["x0"] for c in cells), min(c["y0"] for c in cells),
+                         max(c["x1"] for c in cells), max(c["y1"] for c in cells)),
+                "cells": [(c["x0"], c["x1"], c["text"]) for c in cells],
+            }
+        )
+    return out
+
+
+def detect_tables_by_alignment(fragments: list[dict], page_no: int) -> list[dict]:
+    """Detect tables from column alignment rather than ruling.
+
+    pdfminer reports no table structure at all, and scientific tables are usually booktabs-style
+    with horizontal rules only — so vertical lines cannot be relied on. Consecutive rows that hold
+    the same number of x-aligned cells are a table.
+    """
+    candidates = [row for row in _rows_from_fragments(fragments) if len(row["cells"]) >= 2]
+    if len(candidates) < MIN_TABLE_ROWS:
+        return []
+    candidates.sort(key=lambda row: row["order"])
+
+    tables: list[dict] = []
+    group: list[dict] = []
+
+    def flush() -> None:
+        nonlocal group
+        rows = [g for g in group if len(g["cells"]) == _modal_width(group)]
+        if len(rows) >= MIN_TABLE_ROWS and _aligned([r["cells"] for r in rows]):
+            grid = [[c[2] for c in r["cells"]] for r in rows]
+            if _plausible_table(grid):
+                x0 = min(r["bbox"][0] for r in rows)
+                y0 = min(r["bbox"][1] for r in rows)
+                x1 = max(r["bbox"][2] for r in rows)
+                y1 = max(r["bbox"][3] for r in rows)
+                tables.append({"page": page_no, "bbox": (x0, y0, x1, y1), "grid": grid, "html": _grid_to_html(grid)})
+        group = []
+
+    for row in candidates:
+        if group:
+            previous = group[-1]
+            step = row["order"] - previous["order"]
+            if step > max(6.0, previous["height"]) * 2.6:
+                flush()
+        group.append(row)
+    flush()
+    return tables
+
+
+def _modal_width(lines: list[dict]) -> int:
+    widths = Counter(len(ln["cells"]) for ln in lines)
+    return widths.most_common(1)[0][0] if widths else 0
 
 
 def render_region(pdf: Path, page_no: int, bbox: tuple, page_size: tuple, out_path: Path, dpi: int, sink: dict) -> None:

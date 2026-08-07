@@ -44,12 +44,25 @@ bbox, and renders the region to PNG at your chosen DPI. Detected tables get rend
 crop is bound to its caption and carries page, bbox, and pixel dimensions. Chart-shaped false
 positives from table detection are filtered out by cell fill ratio, so a bar chart stays a figure.
 
+**Tables are found by alignment, not by ruling.** pdfminer reports no table structure at all, and
+PyMuPDF's detector keys on ruled cells — so it misses booktabs-style tables, which have horizontal
+rules only and hold their columns together purely by alignment. Rows are rebuilt from text
+fragments (a cell is often its own text object) and grouped into a table when consecutive rows split
+into the same number of x-aligned columns. It runs on both backends: as the only detector on
+pdfminer, and as a fallback for regions PyMuPDF missed. On the bundled fixture both backends now
+return identical grids for both the ruled and the borderless table.
+
 **References resolve.** `[3]`, `Table 2`, `Eq. 4`, `Section 3.1` get bound to their actual targets
 in the tree. When a chunk says "as shown in Table 2", the generator sees Table 2.
 
 **Chunks follow the document.** Splits happen at section and block boundaries, never mid-table or
 mid-equation. Each chunk keeps its breadcrumb (`Doc > Section 3 > Subsection 3.2`), its page
 numbers, and its source node ids.
+
+HTML and EPUB have no pages, so those blocks carry **anchors** instead — the element `id` when the
+markup has one (`doc.html #results-table`, a real deep link) and a stable ordinal otherwise; EPUB
+anchors name the spine file. Citations use page, then anchor, then section name, and a pageless
+document reports no pages rather than claiming page 0.
 
 **A graph across the whole document, then across the corpus.** Entities, methods, datasets, claims
 and quantities get extracted into a document-level knowledge graph before any question is written.
@@ -149,8 +162,7 @@ Backends: `ollama`, `vllm` and any OpenAI-compatible server, `openai`, `anthropi
 
 Parsing prefers PyMuPDF and falls back to pdfminer.six. pdfminer can't rasterise, so figure
 rendering on that path goes through pypdfium2, with the PNG written directly — no imaging library
-needed. It also has no table detector, so on the pdfminer path tables come out as figure crops
-rather than queryable grids; install PyMuPDF if you want SQL over tables.
+needed. Table detection is backend-independent (see below), so both paths produce queryable grids.
 
 The core has **zero required dependencies**; PDF parsing, rendering, Parquet, YAML config, and Z3
 are all optional extras.

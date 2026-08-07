@@ -25,9 +25,12 @@ BLOCK_KINDS = (PARAGRAPH, TABLE, EQUATION, CAPTION, FOOTNOTE, LIST, CODE, FIGURE
 class Span:
     page: int = 0
     bbox: tuple[float, float, float, float] | None = None
+    anchor: str = ""
+    """Where a block sits in a document that has no pages — an element id or ordinal for HTML,
+    a spine file plus ordinal for EPUB. Without it those formats have no citable location."""
 
     def as_dict(self) -> dict:
-        return {"page": self.page, "bbox": list(self.bbox) if self.bbox else None}
+        return {"page": self.page, "bbox": list(self.bbox) if self.bbox else None, "anchor": self.anchor}
 
 
 @dataclass
@@ -100,6 +103,7 @@ class Node:
         span = Span(
             page=data.get("span", {}).get("page", 0),
             bbox=tuple(data["span"]["bbox"]) if data.get("span", {}).get("bbox") else None,
+            anchor=data.get("span", {}).get("anchor", ""),
         )
         node = Node(
             kind=data["kind"],

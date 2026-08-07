@@ -76,11 +76,14 @@ def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrum
     tables, equations, figures, refs = [], [], [], []
     grids: list[list[list[str]]] = []
     figure_refs: list[dict] = []
-    node_ids, pages, bboxes = [], [], []
+    node_ids, pages, bboxes, anchors = [], [], [], []
 
     for block in blocks:
         node_ids.append(block.id)
-        pages.append(block.span.page)
+        if block.span.anchor:
+            anchors.append(block.span.anchor)
+        else:
+            pages.append(block.span.page)
         if block.span.bbox:
             bboxes.append(list(block.span.bbox))
         if block.kind == TABLE:
@@ -110,6 +113,7 @@ def _make_chunk(tree: DocumentTree, section: Node, blocks: list[Node], breadcrum
         source=tree.source,
         node_ids=node_ids + [section.id],
         pages=sorted(set(pages)),
+        anchors=anchors,
         bboxes=bboxes,
         section_path=[t for t in breadcrumb.split(" > ") if t],
         breadcrumb=breadcrumb,

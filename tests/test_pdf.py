@@ -42,10 +42,80 @@ def test_headings_survive_small_label_text(pdf_tree):
 def test_vector_chart_becomes_a_figure_not_a_table(pdf_tree):
     figures = pdf_tree.nodes([FIGURE])
     tables = pdf_tree.nodes([TABLE])
-    assert len(figures) == 1 and len(tables) == 1
+    assert len(figures) == 1 and len(tables) == 2
     assert figures[0].attrs["caption"].startswith("Figure 1")
-    assert tables[0].attrs["caption"].startswith("Table 1")
-    assert tables[0].attrs["grid"][0] == ["Model", "Params", "Accuracy", "Latency"]
+    ruled = next(t for t in tables if t.attrs["caption"].startswith("Table 1"))
+    assert ruled.attrs["grid"][0] == ["Model", "Params", "Accuracy", "Latency"]
+
+
+BOOKTABS_GRID = [["Dataset", "Documents", "Mean tokens"],
+                 ["RetrievalBench", "48000", "9400"],
+                 ["LongQA", "12000", "3100"]]
+
+
+@pytest.mark.parametrize("backend", ["pymupdf", "pdfminer"])
+def test_borderless_table_is_detected_by_alignment(pdf_path, backend):
+    """A booktabs table has horizontal rules only, so nothing structural marks its columns."""
+    pytest.importorskip("pdfminer.high_level" if backend == "pdfminer" else "fitz")
+    tables = load(pdf_path, backend).nodes([TABLE])
+    grids = [t.attrs["grid"] for t in tables]
+    assert BOOKTABS_GRID in grids
+
+
+@pytest.mark.parametrize("backend", ["pymupdf", "pdfminer"])
+def test_table_rows_are_not_upside_down(pdf_path, backend):
+    """PyMuPDF's y axis points down and pdfminer's points up; the header must come first for both."""
+    pytest.importorskip("pdfminer.high_level" if backend == "pdfminer" else "fitz")
+    for table in load(pdf_path, backend).nodes([TABLE]):
+        grid = table.attrs["grid"]
+        header = grid[0]
+        assert not any(cell.replace(".", "").isdigit() for cell in header if cell), f"numeric header {header}"
+
+
+def test_both_backends_agree_on_the_tables(pdf_path):
+    pytest.importorskip("pdfminer.high_level")
+    by_backend = {
+        backend: sorted([t.attrs["grid"] for t in load(pdf_path, backend).nodes([TABLE])], key=str)
+        for backend in ("pymupdf", "pdfminer")
+    }
+    assert by_backend["pymupdf"] == by_backend["pdfminer"]
+
+
+def test_detected_tables_carry_captions_and_pages(pdf_path):
+    tables = load(pdf_path, "pymupdf").nodes([TABLE])
+    captions = {t.attrs.get("caption", "")[:7] for t in tables}
+    assert {"Table 1", "Table 2"} <= captions
+    assert {t.span.page for t in tables} == {0, 1}
+
+
+def test_prose_is_not_mistaken_for_a_table():
+    from pdfqa.extract import detect_tables_by_alignment
+
+    fragments = [
+        {"x0": 72.0, "x1": 400.0, "y0": 0.0, "y1": 10.0, "order": 0.0, "height": 10.0, "text": "A sentence of prose"},
+        {"x0": 90.0, "x1": 380.0, "y0": 12.0, "y1": 22.0, "order": 12.0, "height": 10.0, "text": "wrapping onto a line"},
+    ]
+    assert detect_tables_by_alignment(fragments, 0) == []
+
+
+def test_alignment_needs_at_least_two_rows():
+    from pdfqa.extract import detect_tables_by_alignment
+
+    one_row = [
+        {"x0": 72.0, "x1": 120.0, "y0": 0.0, "y1": 10.0, "order": 0.0, "height": 10.0, "text": "Model"},
+        {"x0": 200.0, "x1": 260.0, "y0": 0.0, "y1": 10.0, "order": 0.0, "height": 10.0, "text": "Accuracy"},
+    ]
+    assert detect_tables_by_alignment(one_row, 0) == []
+
+
+def test_detected_tables_are_queryable_by_sql(pdf_path):
+    from pdfqa.chunking import chunk_tree
+    from pdfqa.tools import run_sql
+
+    grids = [g for c in chunk_tree(load(pdf_path, "pymupdf"), max_tokens=400) for g in c.grids]
+    result = run_sql("SELECT mean_tokens FROM t WHERE dataset = 'LongQA'", [BOOKTABS_GRID])
+    assert result.ok and result.output.strip() == "3100"
+    assert BOOKTABS_GRID in grids
 
 
 def test_figure_render_covers_its_data_labels(pdf_tree):

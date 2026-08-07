@@ -19,6 +19,7 @@ class Provenance:
     sources: list[str] = field(default_factory=list)
     node_ids: list[str] = field(default_factory=list)
     pages: list[int] = field(default_factory=list)
+    anchors: list[str] = field(default_factory=list)
     bboxes: list[list[float]] = field(default_factory=list)
     section_path: list[str] = field(default_factory=list)
     breadcrumb: str = ""
@@ -32,6 +33,7 @@ class Provenance:
             sources=sorted({s for s in (self.sources + other.sources + [self.source, other.source]) if s}),
             node_ids=list(dict.fromkeys(self.node_ids + other.node_ids)),
             pages=sorted(set(self.pages + other.pages)),
+            anchors=list(dict.fromkeys(self.anchors + other.anchors)),
             bboxes=self.bboxes + other.bboxes,
             section_path=self.section_path or other.section_path,
             breadcrumb=" || ".join(x for x in {self.breadcrumb: 1, other.breadcrumb: 1} if x),

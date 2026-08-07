@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 
-PARSER_VERSION = "6"
+PARSER_VERSION = "7"
 PROMPT_VERSION = "6"
 
 

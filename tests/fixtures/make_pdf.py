@@ -52,9 +52,33 @@ def build() -> Path:
     page.insert_text((72, 620), "SparseRoute at k = 4 improves accuracy by 13.6 points over the dense", fontsize=11)
     page.insert_text((72, 636), "baseline, as shown in Table 1 and Figure 1.", fontsize=11)
 
+    _booktabs_page(doc)
     doc.save(OUT)
     doc.close()
     return OUT
+
+
+BOOKTABS = [["Dataset", "Documents", "Mean tokens"],
+            ["RetrievalBench", "48000", "9400"],
+            ["LongQA", "12000", "3100"]]
+
+
+def _booktabs_page(doc) -> None:
+    """A borderless table: horizontal rules only, columns held together by alignment alone."""
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "3 Datasets", fontsize=13, fontname="hebo")
+    page.insert_text((72, 120), "Table 2: Corpus statistics.", fontsize=9)
+
+    top, left, col_x, row_h = 140, 72, [72, 220, 340], 18
+    page.draw_line(fitz.Point(left, top - 12), fitz.Point(460, top - 12), color=(0, 0, 0))
+    for r, row in enumerate(BOOKTABS):
+        for c, cell in enumerate(row):
+            page.insert_text((col_x[c], top + r * row_h), cell, fontsize=10)
+        if r == 0:
+            page.draw_line(fitz.Point(left, top + 5), fitz.Point(460, top + 5), color=(0, 0, 0))
+    page.draw_line(fitz.Point(left, top + len(BOOKTABS) * row_h - 7), fitz.Point(460, top + len(BOOKTABS) * row_h - 7), color=(0, 0, 0))
+
+    page.insert_text((72, 260), "RetrievalBench is the larger of the two corpora used in this study.", fontsize=11)
 
 
 if __name__ == "__main__":

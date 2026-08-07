@@ -33,11 +33,18 @@ class Passage:
     source: str = ""
     breadcrumb: str = ""
     pages: list[int] = field(default_factory=list)
+    anchors: list[str] = field(default_factory=list)
     node_ids: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
 
     def citation(self) -> str:
-        where = f"p{self.pages[0]}" if self.pages else self.breadcrumb.split(" > ")[-1]
+        """Page for paged formats, anchor for markup ones, section name as a last resort."""
+        if self.pages:
+            where = f"p{self.pages[0]}"
+        elif self.anchors:
+            where = self.anchors[0]
+        else:
+            where = self.breadcrumb.split(" > ")[-1]
         return f"{self.source}{(' ' + where) if where else ''}"
 
 
@@ -118,6 +125,7 @@ class Index:
                         source=row.get("source", ""),
                         breadcrumb=row.get("breadcrumb", ""),
                         pages=row.get("pages", []),
+                        anchors=row.get("anchors", []),
                         node_ids=row.get("node_ids", []),
                         images=row.get("images", []),
                     )
@@ -136,6 +144,7 @@ class Index:
                     source=c.prov.source,
                     breadcrumb=c.prov.breadcrumb,
                     pages=list(c.prov.pages),
+                    anchors=list(c.prov.anchors),
                     node_ids=list(c.prov.node_ids),
                     images=[f["image_path"] for f in c.figure_refs if f.get("image_path")],
                 )

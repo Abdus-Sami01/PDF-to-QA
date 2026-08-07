@@ -27,6 +27,7 @@ from .docast import (
     TABLE,
     DocumentTree,
     Node,
+    Span,
 )
 
 
@@ -38,6 +39,17 @@ class Builder:
         self.stack: list[Node] = [self.root]
         self.source = source
         self._pending_caption: Node | None = None
+        self._ordinal = 0
+        self.anchor_prefix = ""
+        self.current_id = ""
+
+    def next_anchor(self) -> str:
+        """Formats without pages still need a citable location: the element id when the markup has
+        one (a real deep link), otherwise a stable ordinal."""
+        self._ordinal += 1
+        base = self.current_id or f"b{self._ordinal}"
+        self.current_id = ""
+        return f"{self.anchor_prefix}#{base}" if self.anchor_prefix else f"#{base}"
 
     def heading(self, text: str, level: int) -> None:
         text = text.strip()
@@ -45,10 +57,10 @@ class Builder:
             return
         while len(self.stack) > 1 and self.stack[-1].level >= level:
             self.stack.pop()
-        self.stack.append(self.stack[-1].add(Node(HEADING, text=text, level=level)))
+        self.stack.append(self.stack[-1].add(Node(HEADING, text=text, level=level, span=Span(anchor=self.next_anchor()))))
 
     def block(self, kind: str, text: str = "", attrs: dict | None = None) -> Node:
-        node = self.stack[-1].add(Node(kind, text=text.strip(), attrs=attrs or {}))
+        node = self.stack[-1].add(Node(kind, text=text.strip(), attrs=attrs or {}, span=Span(anchor=self.next_anchor())))
         if kind == CAPTION:
             self._pending_caption = node
         elif self._pending_caption is not None and kind in (TABLE, FIGURE, EQUATION):
@@ -139,6 +151,9 @@ class _HTMLReader(HTMLParser):
             return
         if self.skip_depth:
             return
+        element_id = dict(attrs).get("id")
+        if element_id:
+            self.b.current_id = element_id
         if tag == "table":
             self.flush()
             self.table = []
@@ -342,6 +357,7 @@ def from_epub(path: Path, assets_dir: str | Path | None = None) -> DocumentTree:
         builder = Builder(title, path.name)
         reader = _HTMLReader(builder, extracted=extracted)
         for name in order:
+            builder.anchor_prefix = name
             reader.feed(z.read(name).decode("utf-8", "replace"))
             reader.flush()
             reader.mode.clear()
