@@ -29,11 +29,38 @@ EQ_NUM_RE = re.compile(r"\((\d{1,3})\)\s*$")
 MATH_CHARS = set("∑∫∂√≈≠≤≥±×÷αβγδθλμσπΣΩ∈∀∃→⇒^_=")
 
 
+class ExtractError(Exception):
+    """A document could not be parsed. Every backend and adapter failure surfaces as this, so a
+    caller can skip one bad file without knowing which library produced the error."""
+
+
+ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+
+def read_text(path: Path) -> str:
+    """Decode with fallbacks rather than replacing bytes.
+
+    `errors="replace"` turns real characters into U+FFFD and silently corrupts the corpus; older
+    HTML and CSV exports are frequently cp1252 or latin-1, which decode cleanly given the chance.
+    """
+    data = path.read_bytes()
+    for encoding in ENCODINGS:
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", "replace")
+
+
 def load(path: str | Path, backend: str = "auto", assets_dir: str | Path | None = None, dpi: int = 144) -> DocumentTree:
     p = Path(path)
+    if not p.exists():
+        raise ExtractError(f"{p} does not exist")
+    if p.stat().st_size == 0:
+        raise ExtractError(f"{p.name} is empty")
     suffix = p.suffix.lower()
     if suffix in (".md", ".markdown", ".txt"):
-        return from_markdown(p.read_text(encoding="utf-8", errors="replace"), source=p.name)
+        return from_markdown(read_text(p), source=p.name)
     if suffix != ".pdf":
         from . import registry
         from .adapters import SUFFIXES, load as load_adapter
@@ -45,19 +72,17 @@ def load(path: str | Path, backend: str = "auto", assets_dir: str | Path | None 
             return load_adapter(p, assets_dir)
         known = sorted({".pdf", ".md", ".txt"} | set(SUFFIXES) | set(registry.ADAPTERS))
         raise ValueError(f"unsupported input type: {suffix}; supported: {' '.join(known)}")
-    if backend in ("auto", "pymupdf"):
+    failures = []
+    for name, reader in (("pymupdf", _from_pymupdf), ("pdfminer", _from_pdfminer)):
+        if backend not in ("auto", name):
+            continue
         try:
-            return _from_pymupdf(p, assets_dir, dpi)
+            return reader(p, assets_dir, dpi)
         except ImportError:
-            if backend == "pymupdf":
-                raise
-    if backend in ("auto", "pdfminer"):
-        try:
-            return _from_pdfminer(p, assets_dir, dpi)
-        except ImportError:
-            if backend == "pdfminer":
-                raise
-    raise RuntimeError("no PDF backend available; install pymupdf or pdfminer.six")
+            failures.append(f"{name} not installed")
+        except Exception as exc:  # a corrupt PDF must not look like a missing backend
+            failures.append(f"{name}: {type(exc).__name__}: {exc}")
+    raise ExtractError(f"could not read {p.name} — " + "; ".join(failures or ["no PDF backend available"]))
 
 
 # --------------------------------------------------------------------------- markdown

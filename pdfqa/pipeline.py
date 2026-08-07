@@ -15,6 +15,7 @@ from .cache import Store, file_fingerprint, fingerprint
 from .chunking import chunk_tree
 from .config import PARSER_VERSION, PROMPT_VERSION, Config
 from .docast import DocumentTree
+from .extract import ExtractError
 from .graph import KnowledgeGraph, build_graph, merge_graphs
 from .llm import Runtime
 from .records import Chunk, Provenance, QARecord
@@ -249,7 +250,13 @@ class Pipeline:
         corpus_chunks: list[Chunk] = []
 
         for path in _expand(paths):
-            tree = self.parse(path)
+            try:
+                tree = self.parse(path)
+            except (ExtractError, OSError) as exc:
+                # One unreadable file in a large corpus must not discard the whole run.
+                self.report.setdefault("skipped", []).append({"path": str(path), "reason": str(exc)[:300]})
+                self.progress("skip", {"path": str(path), "reason": type(exc).__name__})
+                continue
             chunks = self.chunk(tree)
             kg = self.graph(chunks)
             records = self.synthesize_cached(tree, chunks, kg)

@@ -296,6 +296,24 @@ Grading is a model judge plus two mechanical checks, and the mechanical ones can
 the judge calls correct is downgraded to partial if a number from the reference is missing, since
 judges are lenient about digits and a wrong figure is not a wording difference.
 
+## Surviving a real corpus
+
+Real directories contain broken files, and one of them must not cost you the run. Every parse
+failure surfaces as a single `ExtractError` — not `BadZipFile`, `KeyError`, `JSONDecodeError` and
+`FileDataError` depending on which library gave up — and the pipeline skips the file, records why,
+and carries on:
+
+```json
+"skipped": [
+  {"path": "corpus/notzip.docx", "reason": "notzip.docx is not a readable .docx: File is not a zip file"},
+  {"path": "corpus/broken.ipynb", "reason": "broken.ipynb is not valid notebook JSON: Expecting property name"}
+]
+```
+
+Text is decoded with fallbacks (UTF-8 → cp1252 → latin-1) rather than `errors="replace"`, so a
+latin-1 export reads `café résumé` instead of `caf� r�sum�`, cp1252 smart quotes survive, and a
+UTF-8 BOM does not end up glued to the first column name.
+
 ## Auditing what came out
 
 ```bash

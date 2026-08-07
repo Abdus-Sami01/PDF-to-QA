@@ -251,9 +251,18 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 def from_docx(path: Path) -> DocumentTree:
     import xml.etree.ElementTree as ET
 
-    with zipfile.ZipFile(path) as z:
-        xml = z.read("word/document.xml").decode("utf-8", "replace")
-        title = _docx_title(z) or path.stem
+    from .extract import ExtractError
+
+    try:
+        with zipfile.ZipFile(path) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+            title = _docx_title(z) or path.stem
+    except (zipfile.BadZipFile, KeyError, OSError) as exc:
+        raise ExtractError(f"{path.name} is not a readable .docx: {exc}") from exc
+    try:
+        ET.fromstring(xml)
+    except ET.ParseError as exc:
+        raise ExtractError(f"{path.name} has malformed document.xml: {exc}") from exc
     body = ET.fromstring(xml).find(f"{W}body")
     builder = Builder(title, path.name)
     if body is None:
@@ -337,7 +346,13 @@ def _extract_epub_images(archive: zipfile.ZipFile, assets: Path) -> dict[str, st
 def from_epub(path: Path, assets_dir: str | Path | None = None) -> DocumentTree:
     import xml.etree.ElementTree as ET
 
-    with zipfile.ZipFile(path) as z:
+    from .extract import ExtractError
+
+    try:
+        archive = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ExtractError(f"{path.name} is not a readable .epub: {exc}") from exc
+    with archive as z:
         extracted = _extract_epub_images(z, Path(assets_dir) / path.stem) if assets_dir else {}
         names = z.namelist()
         opf = next((n for n in names if n.endswith(".opf")), None)
@@ -487,9 +502,14 @@ def _tex_plain(text: str) -> str:
 
 
 def from_notebook(text: str, source: str = "inline") -> DocumentTree:
-    from .extract import from_markdown
+    from .extract import ExtractError, from_markdown
 
-    nb = json.loads(text)
+    try:
+        nb = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ExtractError(f"{source} is not valid notebook JSON: {exc}") from exc
+    if not isinstance(nb, dict):
+        raise ExtractError(f"{source} is not a notebook document")
     parts: list[str] = []
     for cell in nb.get("cells", []):
         body = "".join(cell.get("source", []))
@@ -524,13 +544,20 @@ def _notebook_output(out: dict) -> str:
 
 
 def from_csv(text: str, source: str = "inline", max_rows: int = 500) -> DocumentTree:
-    dialect = csv.Sniffer().sniff(text[:4096]) if text.strip() else csv.excel
+    try:
+        # Restrict the candidates: given a single-column file the sniffer has no real delimiter to
+        # find and will happily pick a letter, shredding every value.
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|") if text.strip() else csv.excel
+    except csv.Error:
+        dialect = csv.excel
     rows = list(csv.reader(io.StringIO(text), dialect))[: max_rows + 1]
     grid = [[c.strip() for c in row] for row in rows if any(c.strip() for c in row)]
     builder = Builder(Path(source).stem, source)
     builder.heading(Path(source).stem, 1)
-    if len(grid) >= 2:
+    if len(grid) >= 2 and max((len(row) for row in grid), default=0) >= 2:
         builder.block(TABLE, grid_text(grid), grid_attrs(grid))
+    elif grid:
+        builder.block(PARAGRAPH, "\n".join(row[0] for row in grid if row))
     return builder.build("csv", {"rows": max(0, len(grid) - 1)})
 
 
@@ -555,7 +582,9 @@ def load(path: str | Path, assets_dir: str | Path | None = None) -> DocumentTree
         return from_docx(p)
     if fmt == "epub":
         return from_epub(p, assets_dir)
-    text = p.read_text(encoding="utf-8", errors="replace")
+    from .extract import read_text
+
+    text = read_text(p)
     if fmt == "html":
         return from_html(text, p.name, base=p.parent)
     if fmt == "latex":
