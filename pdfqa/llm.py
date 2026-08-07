@@ -8,18 +8,31 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from array import array
 import json
 import os
 import re
 import time
 import urllib.error
 import urllib.request
+from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 ROLES = ("generate", "verify", "embed", "vision")
+
+Vector = array
+"""Embeddings are packed float32 arrays, not lists — see `select.normalize` for why.
+
+Backends return whatever their transport gives (JSON lists for the HTTP ones); `Runtime.embed` is
+the boundary that packs them, so every caller gets the same type regardless of backend. Arrays are
+not JSON-serialisable: call `list(vector)` before writing one out.
+"""
+
+
+def as_vector(values) -> Vector:
+    return values if isinstance(values, array) and values.typecode == "f" else array("f", values)
+
 
 IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
@@ -55,7 +68,8 @@ class Backend:
     def complete(self, prompt: str, system: str = "", temperature: float = 0.7, max_tokens: int = 1024) -> Completion:
         raise NotImplementedError
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str]) -> list:
+        """Backends may return plain lists; `Runtime.embed` packs them into vectors."""
         raise NotImplementedError(f"{self.name} has no embedding endpoint")
 
     def complete_vision(self, prompt: str, images: list[str], system: str = "", temperature: float = 0.7, max_tokens: int = 1024) -> Completion:
@@ -227,7 +241,7 @@ class Echo(Backend):
             return Completion(self.handler(prompt, system), self.model)
         return Completion(json.dumps({"echo": prompt[-400:]}), self.model)
 
-    def embed(self, texts):
+    def embed(self, texts) -> list[Vector]:
         return [hashed_embedding(t) for t in texts]
 
     def complete_vision(self, prompt, images, system="", temperature=0.7, max_tokens=1024):
@@ -235,7 +249,7 @@ class Echo(Backend):
         return self.complete(f"{prompt}\n\n[images: {tag}]", system, temperature, max_tokens)
 
 
-def hashed_embedding(text: str, dim: int = 256) -> array:
+def hashed_embedding(text: str, dim: int = 256) -> Vector:
     """Deterministic bag-of-ngrams hashing embedding; no model download, decent for dedup."""
     vec = array("f", bytes(4 * dim))
     tokens = re.findall(r"[a-z0-9]+", text.lower())
@@ -305,12 +319,13 @@ class Runtime:
                     time.sleep(self.backoff * (2**attempt))
         raise LLMError(f"vision failed after {self.retries + 1} attempts: {last}")
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str]) -> list[Vector]:
+        """Always returns packed float32 vectors, whichever backend served the request."""
         backend = self.backends.get("embed")
         if backend is None:
             return [hashed_embedding(t) for t in texts]
         try:
-            return backend.embed(texts)
+            return [as_vector(v) for v in backend.embed(texts)]
         except (LLMError, NotImplementedError):
             return [hashed_embedding(t) for t in texts]
 

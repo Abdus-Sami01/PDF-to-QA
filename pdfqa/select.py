@@ -11,7 +11,7 @@ from array import array
 from collections import defaultdict
 from pathlib import Path
 
-from .llm import Runtime
+from .llm import Runtime, Vector
 from .records import Chunk, QARecord
 from .verify import difficulty_bucket, hardness
 
@@ -166,9 +166,6 @@ def dedup_against(records: list[QARecord], reference_questions: list[str], thres
 
 
 # --------------------------------------------------------------------------- dense space
-
-
-Vector = array
 
 
 def cosine(a: Vector, b: Vector) -> float:

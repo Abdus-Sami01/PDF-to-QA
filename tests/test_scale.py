@@ -1,6 +1,8 @@
 import random
 import time
 
+import pytest
+
 from pdfqa.chunking import chunk_tree
 from pdfqa.llm import hashed_embedding
 from pdfqa.records import Provenance, QARecord
@@ -30,11 +32,16 @@ def test_embedding_memory_stays_close_to_four_bytes_per_dimension():
 
     rng = random.Random(3)
     n, dim = 300, 1536
-    tracemalloc.start()
-    base = tracemalloc.get_traced_memory()[0]
-    vectors = [normalize([rng.random() for _ in range(dim)]) for _ in range(n)]
-    used = tracemalloc.get_traced_memory()[0] - base
-    tracemalloc.stop()
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        base = tracemalloc.get_traced_memory()[0]
+        vectors = [normalize([rng.random() for _ in range(dim)]) for _ in range(n)]
+        used = tracemalloc.get_traced_memory()[0] - base
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
     assert len(vectors) == n
     assert used / (n * dim) < 8.0
 
@@ -116,6 +123,38 @@ def test_vectors_are_float_arrays_not_lists():
     v = hashed_embedding("routing accuracy")
     assert isinstance(v, array) and v.typecode == "f"
     assert isinstance(normalize([3.0, 4.0]), array)
+
+
+def test_runtime_packs_vectors_whatever_the_backend_returned():
+    """A backend serving JSON returns plain lists; callers must not have to care which one ran."""
+    from array import array
+
+    from pdfqa.llm import Backend, Runtime
+
+    class ListEmbedder(Backend):
+        name = "listy"
+
+        def embed(self, texts):
+            return [[0.6, 0.8] for _ in texts]
+
+    runtime = Runtime({"generate": {"backend": "echo"}})
+    runtime.backends["embed"] = ListEmbedder()
+    vectors = runtime.embed(["a", "b"])
+    assert all(isinstance(v, array) and v.typecode == "f" for v in vectors)
+    assert cosine(vectors[0], vectors[1]) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_runtime_embed_falls_back_when_a_backend_has_no_endpoint():
+    from array import array
+
+    from pdfqa.llm import Backend, Runtime
+
+    class NoEmbedding(Backend):
+        name = "nope"
+
+    runtime = Runtime({"generate": {"backend": "echo"}})
+    runtime.backends["embed"] = NoEmbedding()
+    assert all(isinstance(v, array) for v in runtime.embed(["a"]))
 
 
 def test_float32_precision_is_far_below_the_dedup_thresholds():

@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .llm import Runtime, hashed_embedding
+from .llm import Runtime, Vector, hashed_embedding
 from .prompts import GROUNDED_ANSWER
 from .select import cosine, normalize
 from .verify import STOP
@@ -57,7 +57,7 @@ class Index:
         self.k1, self.b = k1, b
         self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
         self.lengths: list[int] = []
-        self.vectors: list[list[float]] = []
+        self.vectors: list[Vector] = []
         for i, p in enumerate(passages):
             counts = Counter(terms(p.text))
             self.lengths.append(sum(counts.values()) or 1)
