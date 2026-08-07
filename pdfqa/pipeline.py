@@ -113,8 +113,12 @@ class Pipeline:
 
         if s.multiturn_per_doc:
             picks = self._sample(chunks, s.multiturn_per_doc)
+            # Draw before dispatching: a shared RNG consumed inside worker threads is ordered by
+            # scheduling, so the same seed would otherwise give different personas per run.
+            personas = [self.rng.choice(s.personas) for _ in picks]
             convos = self._map(
-                lambda c: synth.generate_multiturn(self.runtime, c, self.rng.choice(s.personas), s.multiturn_length), picks
+                lambda pair: synth.generate_multiturn(self.runtime, pair[0], pair[1], s.multiturn_length),
+                list(zip(picks, personas)),
             )
             convos = [c for c in convos if c]
             records.extend(convos)
@@ -201,7 +205,8 @@ class Pipeline:
         if ratio <= 0:
             return
         targets = self._sample([r for r in records if not r.turns and r.accepted], int(len(records) * ratio))
-        self._map(lambda r: synth.make_preference_pair(self.runtime, r, rng=self.rng), targets)
+        modes = [self.rng.choice(list(synth.REJECTION_MODES)) for _ in targets]
+        self._map(lambda pair: synth.make_preference_pair(self.runtime, pair[0], mode=pair[1]), list(zip(targets, modes)))
         self.progress("synth.dpo", {"records": sum(1 for r in records if r.rejected)})
 
     def verify(self, records: list[QARecord]) -> list[QARecord]:

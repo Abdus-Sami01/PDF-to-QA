@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import random
 import time
 
@@ -173,3 +175,72 @@ def test_float32_precision_is_far_below_the_dedup_thresholds():
     exact_cos = sum(x * y for x, y in zip(exact(raw_a), exact(raw_b)))
     packed_cos = cosine(normalize(raw_a), normalize(raw_b))
     assert abs(exact_cos - packed_cos) < 1e-5
+
+
+def _latency_handler(delay_rng):
+    """The offline backend returns instantly, which hides scheduling-order bugs entirely."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from conftest import scripted
+
+    def handler(prompt, system=""):
+        time.sleep(delay_rng.uniform(0.001, 0.006))
+        return scripted(prompt, system)
+
+    return handler
+
+
+def _run_ids(config, workers, tmp_path, tag):
+    from pdfqa.pipeline import Pipeline
+
+    config.runtime.workers = workers
+    config.outdir = str(tmp_path / tag)
+    config.cache = False
+    config.formats = ["raw"]
+    config.runtime.generate = {"backend": "echo", "handler": _latency_handler(random.Random(99))}
+    config.runtime.verify = dict(config.runtime.generate)
+    Pipeline(config).run()
+    rows = (Path(config.outdir) / "raw.jsonl").read_text().splitlines()
+    return [(json.loads(r)["task"], json.loads(r)["persona"], json.loads(r)["rejection_mode"]) for r in rows]
+
+
+def test_the_seed_is_honoured_under_concurrency(config, tmp_path):
+    """Guards the seed contract against a future draw moving after a network call.
+
+    Drawing from a shared RNG inside worker threads orders the draws by scheduling rather than by
+    the seed. Today every draw happens before dispatch, so this passes either way; it fails the day
+    someone moves one behind an LLM call, which is exactly when it would stop being reproducible.
+    """
+    outcomes = {tuple(_run_ids(config, 4, tmp_path, f"c{i}")) for i in range(4)}
+    assert len(outcomes) == 1
+
+
+def test_worker_count_does_not_change_the_output(config, tmp_path):
+    single = _run_ids(config, 1, tmp_path, "single")
+    parallel = _run_ids(config, 4, tmp_path, "parallel")
+    assert single == parallel
+
+
+def test_preference_modes_are_drawn_deterministically(config, tmp_path):
+    """Same contract at the stage that draws the most values, with enough targets to interleave."""
+    from pdfqa.pipeline import Pipeline
+    from pdfqa.records import Provenance, QARecord
+
+    def modes_for_one_run():
+        config.runtime.workers = 4
+        config.runtime.generate = {"backend": "echo", "handler": _latency_handler(random.Random(5))}
+        config.runtime.verify = dict(config.runtime.generate)
+        pipeline = Pipeline(config)
+        records = [
+            QARecord(question=f"Question number {i} about routing width?", answer=f"Answer {i} is 74.8 accuracy.",
+                     context="SparseRoute reaches 74.8 accuracy.", prov=Provenance(source="s.md"))
+            for i in range(24)
+        ]
+        pipeline.preference_pairs(records)
+        return [r.rejection_mode for r in records]
+
+    outcomes = {tuple(modes_for_one_run()) for _ in range(3)}
+    assert len(outcomes) == 1
+    assert any(outcomes.pop())
