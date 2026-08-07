@@ -49,8 +49,15 @@ PyMuPDF's detector keys on ruled cells — so it misses booktabs-style tables, w
 rules only and hold their columns together purely by alignment. Rows are rebuilt from text
 fragments (a cell is often its own text object) and grouped into a table when consecutive rows split
 into the same number of x-aligned columns. It runs on both backends: as the only detector on
-pdfminer, and as a fallback for regions PyMuPDF missed. On the bundled fixture both backends now
+pdfminer, and as a fallback for regions PyMuPDF missed. On the bundled fixture both backends
 return identical grids for both the ruled and the borderless table.
+
+Alignment alone is not enough, though: **two-column prose aligns perfectly too**, and it is the
+dominant layout for papers. Left and right column lines share a y band and start at identical x on
+every line, so a purely geometric detector turns a page of text into a two-column "table" and
+deletes the prose underneath it. Cell *content* is what separates them — tables hold short values,
+prose holds sentences — so a candidate is rejected unless most cells are short (≤30 chars, ≤5
+words). One wordy column out of four still passes.
 
 **References resolve.** `[3]`, `Table 2`, `Eq. 4`, `Section 3.1` get bound to their actual targets
 in the tree. When a chunk says "as shown in Table 2", the generator sees Table 2.

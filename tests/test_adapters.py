@@ -270,3 +270,40 @@ def test_unsupported_suffix_names_what_is_supported(tmp_path):
     bad.write_text("hi")
     with pytest.raises(ValueError, match=r"\.docx"):
         load(bad)
+
+
+def test_element_id_is_not_consumed_by_the_preceding_text():
+    """The flush that closes buffered text must not steal the id of the tag that triggered it."""
+    tree = from_html('<html><body><div>Leading intro text<h2 id="results">Results</h2></div></body></html>', "d.html")
+    by_kind = {n.kind: n.span.anchor for n in tree.root.walk() if n.kind != "document"}
+    assert by_kind["heading"] == "#results"
+    assert by_kind["paragraph"].startswith("#b")
+
+
+def test_table_and_image_ids_are_used():
+    table_html = '<html><body><p>Intro.<table id="t1"><tr><td>a</td><td>b</td></tr><tr><td>1</td><td>2</td></tr></table></body></html>'
+    assert next(n.span.anchor for n in from_html(table_html, "d.html").root.walk() if n.kind == TABLE) == "#t1"
+    img_html = '<html><body><p>Intro.<img id="fig1" src="x.png" alt="chart"></body></html>'
+    assert next(n.span.anchor for n in from_html(img_html, "d.html").root.walk() if n.kind == FIGURE) == "#fig1"
+
+
+def test_anchors_reach_generated_records(docs, runtime):
+    from pdfqa.synth import generate_qa
+
+    chunk = next(c for c in chunk_tree(load(docs["html"]), max_tokens=300) if c.prov.anchors)
+    records = generate_qa(runtime, chunk, n=1)
+    assert records
+    assert records[0].prov.anchors == chunk.prov.anchors
+    assert records[0].prov.pages == []
+
+
+def test_anchors_reach_the_exported_metadata(docs, tmp_path, runtime):
+    import json
+
+    from pdfqa.export import export
+    from pdfqa.synth import generate_qa
+
+    chunk = next(c for c in chunk_tree(load(docs["html"]), max_tokens=300) if c.prov.anchors)
+    written = export(generate_qa(runtime, chunk, n=1), tmp_path, ["chatml"])
+    row = json.loads(Path(written["chatml"]).read_text().splitlines()[0])
+    assert row["meta"]["anchors"]

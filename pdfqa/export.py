@@ -154,6 +154,7 @@ def write_parquet(records: list[QARecord], path: str | Path) -> str | None:
             "quality": [r.scores.get("quality", 0.0) for r in records],
             "source": [r.prov.source for r in records],
             "pages": [json.dumps(r.prov.pages) for r in records],
+            "anchors": [json.dumps(r.prov.anchors) for r in records],
             "node_ids": [json.dumps(r.prov.node_ids) for r in records],
             "breadcrumb": [r.prov.breadcrumb for r in records],
             "provenance": [json.dumps(r.prov.verification, ensure_ascii=False, default=str) for r in records],

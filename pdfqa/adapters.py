@@ -151,11 +151,10 @@ class _HTMLReader(HTMLParser):
             return
         if self.skip_depth:
             return
-        element_id = dict(attrs).get("id")
-        if element_id:
-            self.b.current_id = element_id
+        element_id = dict(attrs).get("id") or ""
         if tag == "table":
             self.flush()
+            self.b.current_id = element_id
             self.table = []
         elif tag == "tr" and self.table is not None:
             self.row = []
@@ -163,23 +162,30 @@ class _HTMLReader(HTMLParser):
             self.cell = []
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             self.flush()
+            self.b.current_id = element_id
             self.mode.append(f"h{tag[1]}")
         elif tag in ("pre", "code") and "pre" not in self.mode:
             self.flush()
+            self.b.current_id = element_id
             self.mode.append("pre")
         elif tag in ("figcaption", "caption"):
             self.flush()
+            self.b.current_id = element_id
             self.mode.append("caption")
         elif tag == "img":
             src = dict(attrs).get("src", "")
             alt = dict(attrs).get("alt", "")
             self.flush()
+            self.b.current_id = element_id
             resolved = resolve_image(src, self.base, self.extracted)
             self.b.block(FIGURE, alt, {"image_path": resolved, "src": src, "alt": alt, "caption": alt})
         elif tag == "br":
             self.buf.append("\n")
         elif tag in BLOCK_TAGS:
             self.flush(LIST if tag == "li" else PARAGRAPH)
+            self.b.current_id = element_id
+        elif element_id:
+            self.b.current_id = element_id
 
     def handle_endtag(self, tag):
         if tag in SKIP_TAGS:

@@ -53,6 +53,7 @@ def build() -> Path:
     page.insert_text((72, 636), "baseline, as shown in Table 1 and Figure 1.", fontsize=11)
 
     _booktabs_page(doc)
+    _two_column_page(doc)
     doc.save(OUT)
     doc.close()
     return OUT
@@ -61,6 +62,34 @@ def build() -> Path:
 BOOKTABS = [["Dataset", "Documents", "Mean tokens"],
             ["RetrievalBench", "48000", "9400"],
             ["LongQA", "12000", "3100"]]
+
+
+LEFT_COLUMN = [
+    "We introduce SparseRoute, a router that",
+    "selects a subset of expert blocks for",
+    "every token processed by the network.",
+    "The design keeps latency low while",
+    "retaining most of the dense accuracy.",
+]
+
+RIGHT_COLUMN = [
+    "Our evaluation covers three corpora",
+    "drawn from public retrieval benchmarks.",
+    "Each corpus is split into a training",
+    "portion and a held-out portion so that",
+    "no document appears in both halves.",
+]
+
+
+def _two_column_page(doc) -> None:
+    """Two-column prose: the layout most papers use, and the classic false positive for table
+    detection, because left and right lines share a y band and their starts align perfectly."""
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 90), "4 Discussion", fontsize=13, fontname="hebo")
+    for i, (left, right) in enumerate(zip(LEFT_COLUMN, RIGHT_COLUMN)):
+        y = 130 + i * 16
+        page.insert_text((72, y), left, fontsize=10)
+        page.insert_text((320, y), right, fontsize=10)
 
 
 def _booktabs_page(doc) -> None:

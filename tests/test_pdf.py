@@ -88,6 +88,63 @@ def test_detected_tables_carry_captions_and_pages(pdf_path):
     assert {t.span.page for t in tables} == {0, 1}
 
 
+@pytest.mark.parametrize("backend", ["pymupdf", "pdfminer"])
+def test_two_column_prose_is_not_a_table(pdf_path, backend):
+    """The dominant scientific layout: adjacent columns share a y band and align perfectly."""
+    pytest.importorskip("pdfminer.high_level" if backend == "pdfminer" else "fitz")
+    tree = load(pdf_path, backend)
+    for table in tree.nodes([TABLE]):
+        flat = " ".join(c for row in table.attrs["grid"] for c in row)
+        assert "SparseRoute, a router" not in flat, "prose captured as a table"
+    assert len(tree.nodes([TABLE])) == 2
+
+
+@pytest.mark.parametrize("backend", ["pymupdf", "pdfminer"])
+def test_two_column_prose_survives_as_text(pdf_path, backend):
+    """A false table also deletes the text under it, which is the damaging half of the bug."""
+    pytest.importorskip("pdfminer.high_level" if backend == "pdfminer" else "fitz")
+    from pdfqa.docast import PARAGRAPH
+
+    body = " ".join(n.text for n in load(pdf_path, backend).nodes([PARAGRAPH]))
+    assert "SparseRoute, a router" in body
+    assert "public retrieval benchmarks" in body
+
+
+@pytest.mark.parametrize("backend", ["pymupdf", "pdfminer"])
+def test_page_count_is_reported_from_the_document(pdf_path, backend):
+    pytest.importorskip("pdfminer.high_level" if backend == "pdfminer" else "fitz")
+    assert load(pdf_path, backend).meta["pages"] == 3
+
+
+def test_looks_tabular_separates_values_from_sentences():
+    from pdfqa.extract import _looks_tabular
+
+    assert _looks_tabular([["Model", "Accuracy"], ["Dense", "61.2"]])
+    assert not _looks_tabular([
+        ["We introduce SparseRoute, a router that", "Our evaluation covers three corpora"],
+        ["selects a subset of expert blocks for", "drawn from public retrieval benchmarks."],
+    ])
+    assert not _looks_tabular([])
+
+
+def test_looks_tabular_tolerates_one_wordy_column():
+    from pdfqa.extract import _looks_tabular
+
+    assert _looks_tabular([
+        ["Model", "Params", "Accuracy", "Notes"],
+        ["Dense", "7.0B", "61.2", "the dense baseline trained for twelve epochs"],
+        ["Sparse", "7.0B", "74.8", "the routed variant with four active experts"],
+    ])
+
+
+def test_pdfminer_renders_each_table_to_its_own_file(pdf_path, tmp_path):
+    pytest.importorskip("pdfminer.high_level")
+    pytest.importorskip("pypdfium2")
+    tables = load(pdf_path, "pdfminer", tmp_path / "assets").nodes([TABLE])
+    paths = [t.attrs.get("image_path") for t in tables if t.attrs.get("image_path")]
+    assert len(paths) == len(set(paths)) == len(tables)
+
+
 def test_prose_is_not_mistaken_for_a_table():
     from pdfqa.extract import detect_tables_by_alignment
 

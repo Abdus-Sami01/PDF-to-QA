@@ -284,8 +284,9 @@ def _from_pymupdf(path: Path, assets_dir: str | Path | None = None, dpi: int = 1
         page_blocks.sort(key=lambda b: (round(b["bbox"][1], 1), b["bbox"][0]))
         raw.extend(page_blocks)
         tables.extend({"page": pno, **t} for t in page_tables)
+    page_count = doc.page_count
     doc.close()
-    return _assemble(raw, tables, source=path.name, title=_pdf_title(raw, path))
+    return _assemble(raw, tables, source=path.name, title=_pdf_title(raw, path), page_count=page_count)
 
 
 MIN_FIGURE_SIDE = 24.0
@@ -446,6 +447,25 @@ def _pymupdf_tables(page) -> list[dict]:
     return out
 
 
+MAX_CELL_CHARS = 30
+MAX_CELL_WORDS = 5
+MIN_CELL_LIKE_RATIO = 0.7
+
+
+def _looks_tabular(grid: list[list[str]]) -> bool:
+    """Distinguish a table from two-column prose, which aligns just as well.
+
+    Adjacent columns of body text share a y band and start at identical x on every line, so
+    alignment alone cannot tell them apart — but table cells hold short values while prose cells
+    hold sentences. One long column out of four still passes.
+    """
+    cells = [c.strip() for row in grid for c in row if c.strip()]
+    if not cells:
+        return False
+    cell_like = sum(1 for c in cells if len(c) <= MAX_CELL_CHARS and len(c.split()) <= MAX_CELL_WORDS)
+    return cell_like / len(cells) >= MIN_CELL_LIKE_RATIO
+
+
 def _plausible_table(grid: list[list[str]], min_fill: float = 0.5) -> bool:
     """Chart axes and boxed callouts get detected as tables; real tables are mostly full."""
     if len(grid) < 2 or max((len(r) for r in grid), default=0) < 2:
@@ -525,10 +545,14 @@ def _from_pdfminer(path: Path, assets_dir: str | Path | None = None, dpi: int = 
         raw.extend(page_blocks)
 
     if assets:
+        per_page: dict[int, int] = {}
         for tbl in tables:
+            index = per_page.get(tbl["page"], 0)
+            per_page[tbl["page"]] = index + 1
             page_size = _page_sizes.get(tbl["page"], (612.0, 792.0))
-            render_region(path, tbl["page"], tbl["bbox"], page_size, assets / f"p{tbl['page']:03d}-tbl.png", dpi, tbl)
-    return _assemble(raw, tables, source=path.name, title=_pdf_title(raw, path))
+            render_region(path, tbl["page"], tbl["bbox"], page_size,
+                          assets / f"p{tbl['page']:03d}-tbl{index:02d}.png", dpi, tbl)
+    return _assemble(raw, tables, source=path.name, title=_pdf_title(raw, path), page_count=len(_page_sizes) or None)
 
 
 CELL_GAP_RATIO = 1.6
@@ -627,10 +651,11 @@ def detect_tables_by_alignment(fragments: list[dict], page_no: int) -> list[dict
 
     def flush() -> None:
         nonlocal group
-        rows = [g for g in group if len(g["cells"]) == _modal_width(group)]
+        width = _modal_width(group)
+        rows = [g for g in group if len(g["cells"]) == width]
         if len(rows) >= MIN_TABLE_ROWS and _aligned([r["cells"] for r in rows]):
             grid = [[c[2] for c in r["cells"]] for r in rows]
-            if _plausible_table(grid):
+            if _plausible_table(grid) and _looks_tabular(grid):
                 x0 = min(r["bbox"][0] for r in rows)
                 y0 = min(r["bbox"][1] for r in rows)
                 x1 = max(r["bbox"][2] for r in rows)
@@ -717,7 +742,7 @@ def _pdf_title(raw: list[dict], path: Path) -> str:
     return max(first, key=lambda b: b["size"])["text"].splitlines()[0][:200]
 
 
-def _assemble(raw: list[dict], tables: list[dict], source: str, title: str) -> DocumentTree:
+def _assemble(raw: list[dict], tables: list[dict], source: str, title: str, page_count: int | None = None) -> DocumentTree:
     body_size = _body_size(raw)
     root = Node(DOCUMENT, attrs={"title": title})
     stack = [root]
@@ -761,7 +786,7 @@ def _assemble(raw: list[dict], tables: list[dict], source: str, title: str) -> D
         if caption:
             node.attrs["caption"] = caption
 
-    tree = DocumentTree(root, source=source, meta={"title": title, "format": "pdf", "pages": 1 + max((b["page"] for b in raw), default=0)})
+    tree = DocumentTree(root, source=source, meta={"title": title, "format": "pdf", "pages": page_count or (1 + max([b["page"] for b in raw] + [t["page"] for t in tables], default=0))})
     tree.bind_references()
     return tree
 
