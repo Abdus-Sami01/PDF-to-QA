@@ -85,12 +85,16 @@ def scripted(prompt: str, system: str = "") -> str:
                         "hops": 2, "evidence_a": "k = 4", "evidence_b": first}]}
         )
     if "multi-turn conversation" in prompt:
+        # Quote the context it was actually given. A stub that answers from a fixed script is not
+        # grounded in the chunk under test, so the grounding gates reject it and the multi-turn
+        # path can never be exercised end to end.
+        facts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", ctx) if NUM.search(s)][:2] or [ctx.strip()[:160]]
         return json.dumps(
             {"turns": [
-                {"role": "user", "content": "What routing configuration does SparseRoute use by default?"},
-                {"role": "assistant", "content": "It keeps 4 of 32 experts per token, with routing temperature 0.7."},
-                {"role": "user", "content": "So it activates all 32 of them?"},
-                {"role": "assistant", "content": "No — the source states 4 of 32 experts are selected per token."},
+                {"role": "user", "content": "What does this configuration actually specify?"},
+                {"role": "assistant", "content": facts[0][:300]},
+                {"role": "user", "content": "So none of those numbers matter in practice?"},
+                {"role": "assistant", "content": f"They do. {facts[-1][:260]}"},
             ]}
         )
     if "agentic tool-use" in prompt:

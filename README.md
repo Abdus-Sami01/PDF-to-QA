@@ -129,6 +129,11 @@ so the gate still rejects them.
 Figure-derived rows take a different route: text grounding would falsely reject numbers read off
 an axis, so they're checked against the rendered crop by a vision model instead.
 
+Dialogues are graded on **every** assistant turn, not just the last one. A multi-turn record's
+`answer` field holds only the final turn, which is frequently a one-line correction ("No — the
+source says four of thirty-two"); grading that fragment against the whole passage rejects sound
+conversations outright.
+
 **Then it's deduped and coreset-selected.** MinHash + LSH kills near-identical source text and
 near-identical questions; k-center greedy drops semantic restatements; a greedy submodular (DPP-style)
 pass maximises diversity per token of budget; a final pass balances the simple/intermediate/complex mix.

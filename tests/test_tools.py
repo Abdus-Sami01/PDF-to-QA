@@ -152,3 +152,63 @@ def test_synthesis_is_checkpointed(config):
     second.run()
     assert any("synth" in name for name in second.store.stats()["entries"])
     assert second.runtime.calls == [] or len(second.runtime.calls) < len(first.runtime.calls)
+
+
+# ------------------------------------------------------------------ dialogue grounding
+
+
+def test_generated_text_covers_every_assistant_turn():
+    from pdfqa.verify import generated_text
+
+    rec = dialogue([
+        ("user", "What does the router select?"),
+        ("assistant", "It keeps 4 of 32 experts per token at temperature 0.7."),
+        ("user", "So all 32 are active?"),
+        ("assistant", "No."),
+    ])
+    text = generated_text(rec)
+    assert "temperature 0.7" in text and "No." in text
+    single = QARecord(question="How many?", answer="Four of 32.", context=CTX, prov=Provenance(source="s"))
+    assert generated_text(single) == "Four of 32."
+
+
+def test_grounding_judges_the_whole_dialogue_not_the_last_line():
+    """The final turn is often a one-word correction; judging only that rejects sound data."""
+    from pdfqa.verify import lexical_grounding, numeric_grounding
+
+    context = "SparseRoute keeps 4 of 32 experts per token and the routing temperature is 0.7."
+    rec = dialogue([
+        ("user", "What does SparseRoute select?"),
+        ("assistant", "SparseRoute keeps 4 of 32 experts per token, routing temperature 0.7."),
+        ("user", "Every expert then?"),
+        ("assistant", "No."),
+    ], context=context)
+    assert lexical_grounding(rec).passed
+    assert numeric_grounding(rec).passed
+
+
+def test_a_dialogue_that_drifts_is_still_rejected():
+    from pdfqa.verify import lexical_grounding
+
+    rec = dialogue([
+        ("user", "What does SparseRoute select?"),
+        ("assistant", "Quarterly revenue grew across the European segment last year."),
+        ("user", "Really?"),
+        ("assistant", "Dividends were also raised."),
+    ], context="SparseRoute keeps 4 of 32 experts per token.")
+    assert not lexical_grounding(rec).passed
+
+
+def test_multiturn_records_survive_verification(runtime, tree):
+    """Regression: every dialogue was rejected, so the shape cost model calls and produced nothing."""
+    from pdfqa.chunking import chunk_tree
+    from pdfqa.synth import generate_multiturn
+    from pdfqa.verify import verify
+
+    accepted = 0
+    for chunk in chunk_tree(tree, max_tokens=300):
+        record = generate_multiturn(runtime, chunk)
+        if record is not None:
+            verify(record, runtime)
+            accepted += record.accepted
+    assert accepted > 0

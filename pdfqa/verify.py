@@ -47,11 +47,22 @@ def tokens(text: str) -> list[str]:
     return [t.lower() for t in WORD.findall(text) if t.lower() not in STOP and len(t) > 1]
 
 
+def generated_text(rec: QARecord) -> str:
+    """Everything the model asserted, which is what grounding must be measured against.
+
+    `rec.answer` on a dialogue is only the final assistant turn — frequently a one-line correction
+    — so judging it against the whole context rejects sound multi-turn data outright.
+    """
+    if rec.turns:
+        return "\n".join(t.content for t in rec.turns if t.role == "assistant") or rec.answer
+    return rec.answer
+
+
 # --------------------------------------------------------------------------- cheap gates
 
 
 def lexical_grounding(rec: QARecord, threshold: float = 0.45) -> Gate:
-    ans, ctx = set(tokens(rec.answer)), set(tokens(rec.context))
+    ans, ctx = set(tokens(generated_text(rec))), set(tokens(rec.context))
     if not ans:
         return Gate("lexical_grounding", False, 0.0, "empty answer")
     overlap = len(ans & ctx) / len(ans)
@@ -60,7 +71,7 @@ def lexical_grounding(rec: QARecord, threshold: float = 0.45) -> Gate:
 
 def numeric_grounding(rec: QARecord) -> Gate:
     """Every number in the answer must appear in the source, allowing for rounding."""
-    ans_nums = [float(x) for x in NUMBER.findall(rec.answer)]
+    ans_nums = [float(x) for x in NUMBER.findall(generated_text(rec))]
     ctx_nums = [float(x) for x in NUMBER.findall(rec.context)]
     if not ans_nums:
         return Gate("numeric_grounding", True, 1.0, "no numbers")
@@ -109,7 +120,7 @@ def structural(rec: QARecord, min_q: int = 15, min_a: int = 10) -> Gate:
 
 
 def nli_forward(runtime: Runtime, rec: QARecord, min_confidence: float = 0.5) -> Gate:
-    prompt = NLI_FORWARD.format(context=rec.context[:9000], claim=rec.answer[:3000])
+    prompt = NLI_FORWARD.format(context=rec.context[:9000], claim=generated_text(rec)[:3000])
     data = parse_json(runtime.complete("verify", prompt, temperature=0.0, max_tokens=700), default={}) or {}
     label = str(data.get("label", "neutral")).lower()
     conf = float(data.get("confidence", 0.0) or 0.0)
