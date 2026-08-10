@@ -1,4 +1,4 @@
-# PDF-to-QA
+# PDF2QA
 
 Turns technical documents into verified fine-tuning datasets. It parses them into a typed AST,
 builds a knowledge graph over them, generates SFT / DPO / multi-turn / ReAct / multimodal data
