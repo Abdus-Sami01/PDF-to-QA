@@ -336,16 +336,30 @@ pdfqa report dataset/
 records: 1842   mean quality: 0.79   p10/p50/p90: 0.62/0.81/0.93
 task: {'qa': 902, 'multihop': 341, 'multiturn': 210, 'react': 156, 'figure_qa': 143, 'cross_document': 90}
 
-gate pass rates:
-  nli_forward          1691/1842  (92%)
-  nli_reverse          1553/1842  (84%)
-  trace_execution       141/156   (90%)
+gate pass rates (all generated records):
+  nli_forward          2104/2890  (73%)
+  nli_reverse          1553/2890  (54%)
+  trace_execution       141/312   (45%)
   z3                    398/402   (99%)
+
+shape            generated  verified  final   lost to
+  qa                  1503       980    902   numeric_grounding (312), lexical_grounding (188)
+  multihop             742       402    341   numeric_grounding (240), lexical_grounding (94)
+  multiturn            288       231    210   turn_coherence (41)
+  react                312       171    156   lexical_grounding (98), numeric_grounding (43)
+  cross_document       145        97     90   numeric_grounding (39)
 ```
 
-Gate pass rates are the useful signal: a low `nli_reverse` rate means the generator is writing
-questions answerable from general knowledge, and a low `trace_execution` rate means it is inventing
-tool observations. Both are prompt problems you can see and fix, rather than guess at.
+Rates are over every record that was gated, not over the ones that survived — computed from the
+exported dataset they are ~100% for every gate by construction, since the rejects are exactly what is
+missing from it. `pdfqa report` reads `run_report.json` next to the dataset for this; without that
+file it falls back to survivor-only rates and says so.
+
+A low `nli_reverse` rate means the generator is writing questions answerable from general knowledge,
+and a low `trace_execution` rate means it is inventing tool observations. Both are prompt problems
+you can see and fix, rather than guess at. The yield table answers the other question: a shape
+generated at full model cost and then rejected wholesale otherwise looks exactly like a shape nobody
+asked for.
 
 ## Growing a corpus over time
 

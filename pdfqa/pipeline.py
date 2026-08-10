@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import random
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Iterable
@@ -211,6 +213,7 @@ class Pipeline:
 
     def verify(self, records: list[QARecord]) -> list[QARecord]:
         v = self.cfg.verify
+        self._generated = list(records)
         if not v.enabled:
             return records
         self._map(
@@ -220,7 +223,32 @@ class Pipeline:
         kept = [r for r in records if r.accepted and r.scores.get("quality", 0.0) >= v.min_quality]
         self.progress("verify", {"kept": len(kept), "rejected": len(records) - len(kept)})
         self.report["stages"]["rejections"] = _rejection_counts(records)
+        self._verified = list(kept)
         return kept
+
+    def yield_report(self, final: list[QARecord]) -> dict:
+        """Where records were lost, per shape.
+
+        Composition alone cannot answer "why is there no multi-turn data" — a shape generated at
+        full model cost and rejected wholesale looks exactly like a shape nobody asked for.
+        """
+        generated = getattr(self, "_generated", final)
+        verified = getattr(self, "_verified", final)
+        made, kept, out = Counter(r.task for r in generated), Counter(r.task for r in verified), Counter(r.task for r in final)
+
+        self.report["gates"] = _gate_stats(generated)
+        rows = {}
+        for shape in sorted(made):
+            reasons = Counter(
+                flag[7:] for r in generated if r.task == shape for flag in r.flags if flag.startswith("reject:")
+            )
+            rows[shape] = {
+                "generated": made[shape],
+                "verified": kept.get(shape, 0),
+                "final": out.get(shape, 0),
+                "top_rejections": dict(reasons.most_common(3)),
+            }
+        return rows
 
     def select(self, records: list[QARecord]) -> list[QARecord]:
         s = self.cfg.select
@@ -289,7 +317,9 @@ class Pipeline:
         card = write_dataset_card(kept, stats, out / "DATASET_CARD.md")
 
         self.report["stats"] = stats
+        self.report["yield"] = self.yield_report(kept)
         self.report["files"] = written | {"card": card}
+        self.report["files"]["run_report"] = str(_write_run_report(self.report, out))
         self.report["cache"] = self.store.stats()
         self.report["llm_calls"] = len(self.runtime.calls)
         self.progress("done", {"records": len(kept), "outdir": self.cfg.outdir})
@@ -344,6 +374,30 @@ def _safe(fn, item):
 
 def _has_numbers(chunk: Chunk) -> bool:
     return any(ch.isdigit() for ch in chunk.text)
+
+
+def _gate_stats(records: list[QARecord]) -> dict:
+    """Pass rates across every record that was gated, including the ones that did not survive.
+
+    Computing these from the exported dataset instead reports ~100% for every gate by construction,
+    since rejected records are exactly the ones missing from it.
+    """
+    stats: dict[str, dict[str, int]] = {}
+    for rec in records:
+        for entry in rec.prov.verification:
+            if "passed" not in entry:
+                continue
+            bucket = stats.setdefault(entry["stage"], {"pass": 0, "fail": 0})
+            bucket["pass" if entry["passed"] else "fail"] += 1
+    return dict(sorted(stats.items()))
+
+
+def _write_run_report(report: dict, outdir: Path) -> Path:
+    """Persist the run report so `pdfqa report` can show where records were lost, not just what survived."""
+    path = Path(outdir) / "run_report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    return path
 
 
 def _rejection_counts(records: list[QARecord]) -> dict:

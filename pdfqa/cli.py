@@ -133,15 +133,42 @@ def cmd_report(args) -> int:
     print(f"\ndpo pairs: {summary['with_rejected']}   multimodal: {summary['with_images']}   "
           f"tool traces: {summary['with_tool_trace']} ({summary['repaired_traces']} repaired)   "
           f"dialogues: {summary['multi_turn']}")
-    if summary["gates"]:
-        print("\ngate pass rates:")
-        for name, counts in summary["gates"].items():
+    gates, scope = _gate_rates(args.path, summary)
+    if gates:
+        print(f"\ngate pass rates ({scope}):")
+        for name, counts in gates.items():
             total = counts["pass"] + counts["fail"]
             print(f"  {name:<20} {counts['pass']}/{total}  ({100 * counts['pass'] / max(1, total):.0f}%)")
     print("\nper source:")
     for src, n in list(summary["sources"].items())[:20]:
         print(f"  {n:>6}  {src}")
+    _print_yield(args.path)
     return 0
+
+
+def _run_report(path: str) -> dict:
+    found = sorted(Path(path).rglob("run_report.json")) if Path(path).is_dir() else []
+    return json.loads(found[0].read_text()) if found else {}
+
+
+def _gate_rates(path: str, summary: dict) -> tuple[dict, str]:
+    """Prefer the run report: the exported dataset holds only survivors, so rates taken from it
+    are ~100% for every gate and say nothing about what the gates rejected."""
+    gates = _run_report(path).get("gates")
+    if gates:
+        return gates, "all generated records"
+    return summary["gates"], "surviving records only — run report not found"
+
+
+def _print_yield(path: str) -> None:
+    """Composition says what survived; yield says what was paid for and lost."""
+    rows = _run_report(path).get("yield") or {}
+    if not rows:
+        return
+    print(f"\n{'shape':<16}{'generated':>10}{'verified':>10}{'final':>7}   lost to")
+    for shape, row in rows.items():
+        reasons = ", ".join(f"{name} ({n})" for name, n in row["top_rejections"].items()) or "-"
+        print(f"  {shape:<14}{row['generated']:>10}{row['verified']:>10}{row['final']:>7}   {reasons}")
 
 
 def cmd_plan(args) -> int:

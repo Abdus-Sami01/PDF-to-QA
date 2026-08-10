@@ -183,3 +183,61 @@ def test_verification_does_not_reject_almost_everything(config):
     assert len(kept) / len(generated) > 0.3, Counter(
         flag for record in generated for flag in record.flags
     )
+
+
+# ------------------------------------------------------------------ run report
+
+
+def test_run_report_records_where_records_were_lost(config):
+    config.inputs = [str(FIXTURES / "sample.md"), str(FIXTURES / "sample2.md")]
+    config.formats = ["raw"]
+    report = Pipeline(config).run()
+
+    rows = report["yield"]
+    assert rows
+    for shape, row in rows.items():
+        assert row["generated"] >= row["verified"] >= row["final"], shape
+        if row["generated"] > row["verified"]:
+            assert row["top_rejections"], f"{shape} lost records with no reason recorded"
+
+
+def test_run_report_is_written_next_to_the_dataset(config):
+    report = Pipeline(config).run()
+    path = Path(report["files"]["run_report"])
+    assert path.exists() and path.name == "run_report.json"
+    assert json.loads(path.read_text())["yield"] == report["yield"]
+
+
+def test_gate_rates_cover_rejected_records_not_just_survivors(config):
+    """Rates taken from the exported dataset are ~100% by construction: the rejects are missing."""
+    config.inputs = [str(FIXTURES / "sample.md"), str(FIXTURES / "sample2.md")]
+    config.formats = ["raw"]
+    report = Pipeline(config).run()
+
+    gates = report["gates"]
+    assert gates
+    total_failures = sum(g["fail"] for g in gates.values())
+    assert total_failures > 0, "no gate ever failed, so this cannot be measuring all records"
+    assert any(g["fail"] > 0 and g["pass"] > 0 for g in gates.values())
+
+
+def test_report_command_shows_yield_and_true_gate_rates(config, capsys):
+    from pdfqa.cli import main
+
+    config.inputs = [str(FIXTURES / "sample.md"), str(FIXTURES / "sample2.md")]
+    config.formats = ["raw"]
+    Pipeline(config).run()
+
+    assert main(["report", config.outdir]) == 0
+    out = capsys.readouterr().out
+    assert "all generated records" in out
+    assert "lost to" in out
+
+
+def test_report_falls_back_when_there_is_no_run_report(config, tmp_path, capsys):
+    from pdfqa.cli import main
+
+    Pipeline(config).run()
+    Path(config.outdir, "run_report.json").unlink()
+    assert main(["report", config.outdir]) == 0
+    assert "run report not found" in capsys.readouterr().out
