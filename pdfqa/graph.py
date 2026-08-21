@@ -11,7 +11,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from .llm import Runtime, parse_json
+from .llm import Runtime, expect_json, parse_json
 from .prompts import KG_EXTRACT
 from .records import Chunk
 
@@ -325,7 +325,7 @@ def llm_pass(kg: KnowledgeGraph, chunk: Chunk, runtime: Runtime) -> None:
         raw = runtime.complete("generate", prompt, temperature=0.0, max_tokens=1400)
     except Exception:
         return
-    data = parse_json(raw, default={}) or {}
+    data = expect_json(runtime, "graph", raw)
     if isinstance(data, list):
         data = {"entities": data, "relations": []}
     for e in data.get("entities", []) or []:

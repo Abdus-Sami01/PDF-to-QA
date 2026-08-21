@@ -283,6 +283,23 @@ indication that anything had gone wrong. Model calls are now accounted for rathe
 - Failures that were survived are still reported. One exploding chunk, plugin task, or multi-hop
   call no longer vanishes — it lands in `errors` in the run report and on stderr.
 
+A call can also succeed and still be useless. Small local models — the quickstart's own
+`qwen2.5:7b` among them — answer fluently in prose when asked for JSON, and every stage here parses
+the reply as JSON. That failed silently in two directions at once: synthesis produced no records,
+while `nli_forward` and `clarity` rejected sound data on a verdict they never received and
+`nli_reverse` waved everything through. The gate statistics then blamed the gates, so the obvious
+response was to loosen thresholds when the real problem was the verifier's output format.
+
+Gates now have a third state. A reply the judge cannot be read from is *inconclusive*: it does not
+reject the record, it earns no quality marks, it flags the record `unverified:<gate>`, and it is
+counted separately from passes and failures. Unusable replies are tallied per stage and reported:
+
+```
+spend: 1204 model calls   611,204 prompt + 298,110 completion = 909,314 tokens
+  318 reply(s) were paid for but could not be parsed: generate_qa x214, nli_forward x104
+       generate_qa: Sure! Here is my analysis of the passage in plain prose.
+```
+
 Stages that make one call for a whole document — multi-hop, cross-document, graph extraction,
 plugin tasks — used to be unguarded, so a single failure there discarded every document already paid
 for. They now degrade instead: graph extraction falls back to the rule-based path, the others return

@@ -38,9 +38,21 @@ class Gate:
     passed: bool
     score: float = 0.0
     detail: str = ""
+    inconclusive: bool = False
+    """The judge never returned a verdict. Distinct from a verdict of "fail": rejecting a record
+    because the verifier emitted prose instead of JSON destroys good data and blames the gate."""
 
     def as_dict(self) -> dict:
-        return {"stage": self.name, "passed": self.passed, "score": round(self.score, 4), "detail": self.detail[:400]}
+        out = {"stage": self.name, "passed": self.passed, "score": round(self.score, 4), "detail": self.detail[:400]}
+        if self.inconclusive:
+            out["inconclusive"] = True
+        return out
+
+
+def unjudged(name: str, raw: str) -> Gate:
+    """A reply the judge could not be read from. Non-blocking, but counted and flagged, because a
+    model that cannot emit JSON is a backend problem and must not read as a data problem."""
+    return Gate(name, True, 0.0, f"verifier reply did not parse: {raw.strip()[:120]!r}", inconclusive=True)
 
 
 def tokens(text: str) -> list[str]:
@@ -139,7 +151,10 @@ def structural(rec: QARecord, min_q: int = 15, min_a: int = 10) -> Gate:
 
 def nli_forward(runtime: Runtime, rec: QARecord, min_confidence: float = 0.5) -> Gate:
     prompt = NLI_FORWARD.format(context=rec.context[:9000], claim=generated_text(rec)[:3000])
-    data = parse_json(runtime.complete("verify", prompt, temperature=0.0, max_tokens=700), default={}) or {}
+    raw = runtime.complete("verify", prompt, temperature=0.0, max_tokens=700)
+    data = parse_json(raw, default=None)
+    if not isinstance(data, dict) or not data:
+        return unjudged("nli_forward", raw)
     label = str(data.get("label", "neutral")).lower()
     conf = float(data.get("confidence", 0.0) or 0.0)
     passed = label == "entailment" and conf >= min_confidence
@@ -152,7 +167,10 @@ def nli_forward(runtime: Runtime, rec: QARecord, min_confidence: float = 0.5) ->
 def nli_reverse(runtime: Runtime, rec: QARecord) -> Gate:
     """Passes when the question genuinely needs the document — no external-knowledge shortcut."""
     prompt = NLI_REVERSE.format(question=rec.question[:2000], answer=rec.answer[:2000])
-    data = parse_json(runtime.complete("verify", prompt, temperature=0.0, max_tokens=700), default={}) or {}
+    raw = runtime.complete("verify", prompt, temperature=0.0, max_tokens=700)
+    data = parse_json(raw, default=None)
+    if not isinstance(data, dict) or not data:
+        return unjudged("nli_reverse", raw)
     leaked = bool(data.get("answerable_without_source")) and bool(data.get("matches_source_answer"))
     conf = float(data.get("confidence", 0.0) or 0.0)
     return Gate("nli_reverse", not leaked, 1.0 - conf if leaked else 1.0, "answerable from general knowledge" if leaked else "requires source")
@@ -160,7 +178,10 @@ def nli_reverse(runtime: Runtime, rec: QARecord) -> Gate:
 
 def clarity(runtime: Runtime, rec: QARecord, threshold: float = 0.6) -> Gate:
     prompt = CLARIFY_CHECK.format(question=rec.question[:2000], answer=rec.answer[:3000])
-    data = parse_json(runtime.complete("verify", prompt, temperature=0.0, max_tokens=600), default={}) or {}
+    raw = runtime.complete("verify", prompt, temperature=0.0, max_tokens=600)
+    data = parse_json(raw, default=None)
+    if not isinstance(data, dict) or not data:
+        return unjudged("clarity", raw)
     keys = ("standalone", "specific", "natural", "answer_complete")
     vals = [float(data.get(k, 0.0) or 0.0) for k in keys]
     score = sum(vals) / len(keys)
@@ -415,7 +436,9 @@ def verify(
     for g in gates:
         rec.scores[g.name] = round(g.score, 4)
         rec.prov.verification.append(g.as_dict())
-        if not g.passed:
+        if g.inconclusive:
+            rec.flags.append(f"unverified:{g.name}")
+        elif not g.passed:
             rec.flags.append(f"reject:{g.name}")
     rec.scores["quality"] = quality_score(rec, gates)
     return rec
@@ -438,8 +461,9 @@ def quality_score(rec: QARecord, gates: list[Gate]) -> float:
         "standalone_question": 1.0,
         "structural": 0.5,
     }
-    num = sum(weights.get(g.name, 1.0) * (g.score if g.passed else 0.0) for g in gates)
-    den = sum(weights.get(g.name, 1.0) for g in gates) or 1.0
+    judged = [g for g in gates if not g.inconclusive]
+    num = sum(weights.get(g.name, 1.0) * (g.score if g.passed else 0.0) for g in judged)
+    den = sum(weights.get(g.name, 1.0) for g in judged) or 1.0
     return round(num / den, 4)
 
 

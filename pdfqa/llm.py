@@ -329,6 +329,7 @@ class Runtime:
         self.budget_tokens = budget_tokens
         self.calls: list[dict] = []
         self.errors: list[dict] = []
+        self.unparsed: list[dict] = []
         self._lock = threading.Lock()
 
     def backend(self, role: str) -> Backend:
@@ -395,6 +396,12 @@ class Runtime:
             completion += int(u.get("completion_tokens") or u.get("output_tokens") or 0)
         return {"prompt": prompt, "completion": completion, "total": prompt + completion}
 
+    def note_unparsed(self, stage: str, raw: str) -> None:
+        """The call succeeded and was paid for, but the reply was not usable. Common with small
+        local models, and invisible until counted: the stage simply produces nothing."""
+        with self._lock:
+            self.unparsed.append({"stage": stage, "sample": raw.strip()[:200]})
+
     def health(self) -> dict:
         """Calls made against calls lost, per role — the difference between a slow run and a dead backend."""
         by_role: dict[str, dict] = {}
@@ -410,6 +417,8 @@ class Runtime:
             "by_role": dict(sorted(by_role.items())),
             "tokens": self.tokens(),
             "first_errors": [e["error"] for e in errors[:3]],
+            "unparsed": _tally(self.unparsed),
+            "first_unparsed": [f"{u['stage']}: {u['sample']}" for u in self.unparsed[:3]],
         }
 
     def embed(self, texts: list[str]) -> list[Vector]:
@@ -421,6 +430,22 @@ class Runtime:
             return [as_vector(v) for v in backend.embed(texts)]
         except (LLMError, NotImplementedError):
             return [hashed_embedding(t) for t in texts]
+
+
+def _tally(entries: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for e in entries:
+        counts[e["stage"]] = counts.get(e["stage"], 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def expect_json(runtime, stage: str, raw: str):
+    """Parse a model reply that is supposed to be JSON, recording the miss when it is not."""
+    data = parse_json(raw, default=None)
+    if not isinstance(data, (dict, list)) or not data:
+        runtime.note_unparsed(stage, raw)
+        return {}
+    return data
 
 
 JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.S)

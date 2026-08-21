@@ -9,6 +9,7 @@ import pytest
 from pdfqa.extract import ExtractError, load, read_text
 from pdfqa.llm import Backend, Completion, LLMError, Runtime
 from pdfqa.pipeline import Pipeline
+from pdfqa.records import Provenance, QARecord
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -312,3 +313,81 @@ def test_a_scan_with_no_extractable_text_says_so(config, tmp_path):
 
     report = Pipeline(config).run()
     assert any("no extractable text" in s["reason"] for s in report.get("skipped", []))
+
+
+# ------------------------------------------------------------------ unusable model output
+
+
+class Chatty(Backend):
+    """Answers every call fluently and never in JSON — the normal failure of a small local model."""
+
+    name = "chatty"
+
+    def __init__(self):
+        self.model = "chatty"
+
+    def complete(self, prompt, system="", temperature=0.7, max_tokens=1024):
+        return Completion("Sure! Here is my analysis of the passage in plain prose.", self.model)
+
+
+def test_a_verifier_that_cannot_emit_json_does_not_reject_good_data():
+    """It used to fail nli_forward and clarity outright and wave nli_reverse through, so a broken
+    judge read as a data problem and quietly destroyed sound records."""
+    from pdfqa.verify import clarity, nli_forward, nli_reverse
+
+    rt = Runtime({})
+    rt.backends["verify"] = Chatty()
+    record = QARecord(question="What is the reported accuracy?", answer="74.8 percent.",
+                      context="The model reached 74.8 percent accuracy.", prov=Provenance(source="s.md"))
+
+    for gate in (nli_forward(rt, record), nli_reverse(rt, record), clarity(rt, record)):
+        assert gate.inconclusive, gate.name
+        assert gate.passed, f"{gate.name} rejected a record on a verdict it never received"
+
+
+def test_an_inconclusive_gate_marks_the_record_unverified_not_rejected():
+    from pdfqa.verify import verify as verify_record
+
+    rt = Runtime({})
+    rt.backends["verify"] = Chatty()
+    rt.backends["generate"] = Chatty()
+    record = QARecord(question="What accuracy is reported for the routed model?", answer="74.8 percent.",
+                      context="The routed model reached 74.8 percent accuracy on the held-out split.",
+                      prov=Provenance(source="s.md"))
+    verify_record(record, rt, use_model_gates=True, use_symbolic=False, use_z3=False)
+
+    assert record.accepted, record.flags
+    assert any(f.startswith("unverified:") for f in record.flags)
+
+
+def test_an_inconclusive_gate_does_not_earn_quality_marks():
+    from pdfqa.verify import Gate, quality_score
+
+    record = QARecord(question="q", answer="a", context="c", prov=Provenance(source="s.md"))
+    real = Gate("structural", True, 1.0)
+    assert quality_score(record, [real, Gate("nli_forward", True, 0.0, inconclusive=True)]) == quality_score(record, [real])
+
+
+def test_unparseable_replies_are_counted_per_stage():
+    from pdfqa.llm import expect_json
+
+    rt = Runtime({})
+    expect_json(rt, "generate_qa", "not json at all")
+    expect_json(rt, "generate_qa", "still prose")
+    expect_json(rt, "evolve", "nope")
+    assert rt.health()["unparsed"] == {"evolve": 1, "generate_qa": 2}
+    assert expect_json(rt, "generate_qa", '{"a": 1}') == {"a": 1}
+
+
+def test_a_run_whose_model_never_emits_json_says_so(config):
+    """Every call succeeds and is billed; the dataset comes out empty. Without this the report shows
+    an empty dataset and a backend in perfect health."""
+    config.cache = False
+    pipeline = Pipeline(config)
+    for role in ("generate", "verify"):
+        pipeline.runtime.backends[role] = Chatty()
+
+    report = pipeline.run()
+    assert report["runtime"]["unparsed"], "unusable replies were not counted anywhere"
+    assert report["runtime"]["failures"] == 0
+    assert report["runtime"]["calls"] > 0

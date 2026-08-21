@@ -498,8 +498,10 @@ def _gate_stats(records: list[QARecord]) -> dict:
         for entry in rec.prov.verification:
             if "passed" not in entry:
                 continue
-            bucket = stats.setdefault(entry["stage"], {"pass": 0, "fail": 0})
-            bucket["pass" if entry["passed"] else "fail"] += 1
+            bucket = stats.setdefault(entry["stage"], {"pass": 0, "fail": 0, "inconclusive": 0})
+            # An inconclusive gate never returned a verdict; counting it as a pass would report a
+            # verifier that emits prose instead of JSON as a gate with a perfect record.
+            bucket["inconclusive" if entry.get("inconclusive") else ("pass" if entry["passed"] else "fail")] += 1
     return dict(sorted(stats.items()))
 
 

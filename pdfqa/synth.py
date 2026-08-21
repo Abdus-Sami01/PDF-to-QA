@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 
 from .graph import KnowledgeGraph, cross_document_pairs, serialize_path
-from .llm import LLMError, Runtime, parse_json
+from .llm import LLMError, Runtime, expect_json, parse_json
 from .prompts import (
     CROSS_DOC_GENERATE,
     EVOL_INSTRUCT,
@@ -42,7 +42,7 @@ def generate_qa(runtime: Runtime, chunk: Chunk, n: int = 3, temperature: float =
     context = chunk.context()
     prompt = QA_GENERATE.format(breadcrumb=chunk.prov.breadcrumb, context=context[:8000], n=n)
     raw = runtime.complete("generate", prompt, temperature=temperature, max_tokens=2048)
-    data = parse_json(raw, default={}) or {}
+    data = expect_json(runtime, "generate_qa", raw)
     pairs = data.get("pairs", data if isinstance(data, list) else [])
     out = []
     for p in pairs:
@@ -81,7 +81,7 @@ def generate_multihop(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int = 8, pe
             n=per_pair,
         )
         raw = runtime.complete("generate", prompt, temperature=0.8, max_tokens=2048)
-        data = parse_json(raw, default={}) or {}
+        data = expect_json(runtime, "generate_multihop", raw)
         joined = chunk_a.context() + "\n\n---\n\n" + chunk_b.context()
         for p in data.get("pairs", []) or []:
             if not isinstance(p, dict) or not p.get("question"):
@@ -124,7 +124,7 @@ def generate_cross_document(runtime: Runtime, kg: KnowledgeGraph, n_pairs: int =
             n=per_pair,
         )
         raw = runtime.complete("generate", prompt, temperature=0.8, max_tokens=2048)
-        data = parse_json(raw, default={}) or {}
+        data = expect_json(runtime, "generate_cross_document", raw)
         joined = chunk_a.context() + "\n\n---\n\n" + chunk_b.context()
         for p in data.get("pairs", []) or []:
             if not isinstance(p, dict) or not p.get("question"):
@@ -163,7 +163,7 @@ def generate_multiturn(runtime: Runtime, chunk: Chunk, persona: str = "practitio
         turns=turns,
     )
     raw = runtime.complete("generate", prompt, temperature=0.9, max_tokens=3000)
-    data = parse_json(raw, default={}) or {}
+    data = expect_json(runtime, "generate_multiturn", raw)
     items = data.get("turns", data if isinstance(data, list) else [])
     parsed = [Turn(str(t["role"]), str(t["content"]).strip()) for t in items if isinstance(t, dict) and t.get("role") and t.get("content")]
     if len(parsed) < 2:
@@ -206,7 +206,7 @@ def generate_react(runtime: Runtime, chunk: Chunk, corpus: list[Chunk] | None = 
         schema=describe_schema(grids, captions),
     )
     raw = runtime.complete("generate", prompt, temperature=0.7, max_tokens=2500)
-    data = parse_json(raw, default={}) or {}
+    data = expect_json(runtime, "generate_react", raw)
     trace = [t for t in (data.get("trace") or []) if isinstance(t, dict) and t.get("action")]
     if not data.get("question") or not trace:
         return None
@@ -264,7 +264,7 @@ def generate_figure_qa(runtime: Runtime, chunk: Chunk, n: int = 2) -> list[QARec
             raw = runtime.complete_vision(prompt, [fig["image_path"]], temperature=0.7, max_tokens=1800)
         except LLMError:
             continue
-        data = parse_json(raw, default={}) or {}
+        data = expect_json(runtime, "generate_figure_qa", raw)
         for p in data.get("pairs", []) or []:
             if not isinstance(p, dict) or not p.get("question") or not p.get("answer"):
                 continue
@@ -294,7 +294,7 @@ def apply_persona(runtime: Runtime, rec: QARecord, persona: str, style: str) -> 
         answer=rec.answer,
     )
     raw = runtime.complete("generate", prompt, temperature=0.8, max_tokens=1500)
-    data = parse_json(raw, default={}) or {}
+    data = expect_json(runtime, "apply_persona", raw)
     if not data.get("question") or not data.get("answer"):
         return rec
     clone = QARecord(
@@ -335,7 +335,7 @@ def evolve(runtime: Runtime, rec: QARecord, mutation: str | None = None, rng: ra
         context=rec.context[:8000],
     )
     raw = runtime.complete("generate", prompt, temperature=0.9, max_tokens=1800)
-    data = parse_json(raw, default={}) or {}
+    data = expect_json(runtime, "evolve", raw)
     if not data.get("applied", True) or not data.get("question") or not data.get("answer"):
         return rec
     evolved = QARecord(
@@ -363,7 +363,7 @@ def make_preference_pair(runtime: Runtime, rec: QARecord, mode: str | None = Non
         context=rec.context[:8000],
     )
     raw = runtime.complete("generate", prompt, temperature=0.9, max_tokens=1500)
-    data = parse_json(raw, default={}) or {}
+    data = expect_json(runtime, "make_preference_pair", raw)
     rejected = str(data.get("rejected", "")).strip()
     if not rejected or rejected == rec.answer:
         return rec

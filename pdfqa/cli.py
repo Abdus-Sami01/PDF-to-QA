@@ -78,6 +78,10 @@ def _warn_about_losses(report: dict) -> None:
         print(f"[warn] {errors['count']} task(s) failed and were skipped: {kinds}", file=sys.stderr)
         for sample in errors["samples"][:3]:
             print(f"       {sample['stage']}: {sample['error']}", file=sys.stderr)
+    unparsed = (report.get("runtime") or {}).get("unparsed")
+    if unparsed:
+        print(f"[warn] {sum(unparsed.values())} model reply(s) did not parse as JSON: "
+              + ", ".join(f"{k} x{v}" for k, v in unparsed.items()), file=sys.stderr)
     if report.get("halted"):
         print(f"[warn] run stopped early: {report['halted']}", file=sys.stderr)
     for skip in report.get("skipped", []):
@@ -174,6 +178,12 @@ def _print_spend(path: str) -> None:
               f"{tokens['prompt']} prompt + {tokens['completion']} completion = {tokens['total']} tokens")
         if health["failures"]:
             print(f"  {health['failures']} call(s) failed: {health['first_errors'][0] if health['first_errors'] else ''}")
+        if health.get("unparsed"):
+            total = sum(health["unparsed"].values())
+            print(f"  {total} reply(s) were paid for but could not be parsed: "
+                  + ", ".join(f"{k} x{v}" for k, v in health["unparsed"].items()))
+            for sample in health.get("first_unparsed", [])[:2]:
+                print(f"       {sample}")
     if errors:
         print(f"  {errors['count']} task(s) skipped after errors: "
               + ", ".join(f"{k} x{v}" for k, v in sorted(errors["by_type"].items())))
