@@ -76,6 +76,7 @@ class RuntimeConfig:
     vision: dict = field(default_factory=dict)
     workers: int = 4
     retries: int = 2
+    budget_tokens: int | None = None
 
 
 @dataclass

@@ -244,6 +244,40 @@ estimated cost at $3.0/M in, $15.0/M out: $2.80
 `verify.z3` or `verify.symbolic` and re-plan before committing. Prices are yours to supply rather
 than baked in, since published rates change and a stale table would be worse than none.
 
+An estimate isn't a limit, so runs also take a hard ceiling. It stops generating and exports what it
+already paid for, rather than throwing the run away:
+
+```bash
+pdfqa run papers/ -o dataset/ --budget-tokens 2000000
+```
+
+## When the backend is the problem
+
+A run against a wrong `base_url`, a rejected key, or a vLLM box that died used to exit zero: every
+call failed, every failure was swallowed, and you got an empty dataset, a dataset card, and no
+indication that anything had gone wrong. Model calls are now accounted for rather than discarded.
+
+- Errors are classified. `401`, `403`, `404` and `400` fail the same way on every attempt, so they
+  are not retried — retrying a rejected key three times with exponential backoff only delays the
+  message that says the key is rejected. `429` and `5xx` are retried, and `429` waits exactly as long
+  as the provider's `Retry-After` header asked rather than guessing an interval.
+- A backend that has never once answered is declared dead after five failures and stops being
+  called. Before, a bad `base_url` cost a whole corpus of retries and sleeps before producing
+  nothing.
+- A run where no call ever succeeded exits non-zero with the first failure quoted, instead of
+  shipping an empty dataset.
+- Failures that were survived are still reported. One exploding chunk, plugin task, or multi-hop
+  call no longer vanishes — it lands in `errors` in the run report and on stderr.
+
+Stages that make one call for a whole document — multi-hop, cross-document, graph extraction,
+plugin tasks — used to be unguarded, so a single failure there discarded every document already paid
+for. They now degrade instead: graph extraction falls back to the rule-based path, the others return
+nothing, and the run continues.
+
+A document that parses cleanly but yields no text — an image-only scan — is reported as a skip
+saying so, since zero records is otherwise indistinguishable from a document nobody found
+interesting.
+
 ## Extending it without forking
 
 Three registration points, all additive — built-ins keep working whether or not anything is
@@ -360,6 +394,14 @@ and a low `trace_execution` rate means it is inventing tool observations. Both a
 you can see and fix, rather than guess at. The yield table answers the other question: a shape
 generated at full model cost and then rejected wholesale otherwise looks exactly like a shape nobody
 asked for.
+
+`report` closes with what the run cost and what it lost:
+
+```
+spend: 566 model calls   272,854 prompt + 132,020 completion = 404,874 tokens
+  4 call(s) failed: role=verify failed after 3 attempts: ... -> 429
+  2 task(s) skipped after errors: TimeoutError x2
+```
 
 ## Growing a corpus over time
 

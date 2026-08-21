@@ -8,7 +8,7 @@ from .export import audit, load_records, split_records, write_corpus
 from .export import export as export_dataset
 from .extract import ExtractError, from_markdown, load
 from .graph import KnowledgeGraph, build_graph, merge_graphs
-from .llm import Runtime
+from .llm import BudgetExceeded, LLMError, Runtime
 from .pipeline import Pipeline
 from .plan import estimate
 from .records import Chunk, Provenance, QARecord
@@ -16,15 +16,17 @@ from .registry import register_adapter, register_format, register_task
 from .retrieve import Index, answer
 from .tools import execute
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
+    "BudgetExceeded",
     "Chunk",
     "Config",
     "DocumentTree",
     "ExtractError",
     "Index",
     "KnowledgeGraph",
+    "LLMError",
     "Node",
     "Pipeline",
     "Provenance",

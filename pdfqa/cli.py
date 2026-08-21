@@ -13,9 +13,9 @@ from .config import Config
 from .docast import EQUATION, HEADING
 from .export import audit, load_records
 from .evaluate import evaluate
-from .extract import load
+from .extract import ExtractError, load
 from .graph import build_graph, dump
-from .llm import Runtime
+from .llm import LLMError, Runtime
 from .pipeline import Pipeline, _expand
 from .plan import collect_chunks, estimate, format_plan
 from .retrieve import Index, answer
@@ -62,9 +62,26 @@ def _config(args) -> Config:
 
 def cmd_run(args) -> int:
     cfg = _config(args)
+    if getattr(args, "budget_tokens", None):
+        cfg.runtime.budget_tokens = args.budget_tokens
     report = Pipeline(cfg, _progress).run()
     print(json.dumps(report, indent=2, default=str))
+    _warn_about_losses(report)
     return 0
+
+
+def _warn_about_losses(report: dict) -> None:
+    """Failures that were survived are still failures, and stderr is where they get noticed."""
+    errors = report.get("errors")
+    if errors:
+        kinds = ", ".join(f"{k} x{v}" for k, v in sorted(errors["by_type"].items()))
+        print(f"[warn] {errors['count']} task(s) failed and were skipped: {kinds}", file=sys.stderr)
+        for sample in errors["samples"][:3]:
+            print(f"       {sample['stage']}: {sample['error']}", file=sys.stderr)
+    if report.get("halted"):
+        print(f"[warn] run stopped early: {report['halted']}", file=sys.stderr)
+    for skip in report.get("skipped", []):
+        print(f"[warn] skipped {skip['path']}: {skip['reason']}", file=sys.stderr)
 
 
 def cmd_inspect(args) -> int:
@@ -143,7 +160,25 @@ def cmd_report(args) -> int:
     for src, n in list(summary["sources"].items())[:20]:
         print(f"  {n:>6}  {src}")
     _print_yield(args.path)
+    _print_spend(args.path)
     return 0
+
+
+def _print_spend(path: str) -> None:
+    """What the dataset cost, and what was lost on the way — both are invisible in the records."""
+    report = _run_report(path)
+    health, errors = report.get("runtime") or {}, report.get("errors")
+    if health:
+        tokens = health["tokens"]
+        print(f"\nspend: {health['calls']} model calls   "
+              f"{tokens['prompt']} prompt + {tokens['completion']} completion = {tokens['total']} tokens")
+        if health["failures"]:
+            print(f"  {health['failures']} call(s) failed: {health['first_errors'][0] if health['first_errors'] else ''}")
+    if errors:
+        print(f"  {errors['count']} task(s) skipped after errors: "
+              + ", ".join(f"{k} x{v}" for k, v in sorted(errors["by_type"].items())))
+    if report.get("halted"):
+        print(f"  run stopped early: {report['halted']}")
 
 
 def _run_report(path: str) -> dict:
@@ -290,6 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-corpus", action="store_true", help="skip the retrieval corpus export")
     run.add_argument("--against", nargs="+", help="drop questions that near-duplicate these earlier exports")
     run.add_argument("--no-cache", action="store_true")
+    run.add_argument("--budget-tokens", type=int,
+                     help="stop generating once this many model tokens are spent, and export what is done")
     run.set_defaults(func=cmd_run)
 
     ins = sub.add_parser("inspect", help="show the parsed AST, references, and chunk plan")
@@ -362,7 +399,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (LLMError, ExtractError, ValueError) as exc:
+        # These are the ways a run fails on the user's configuration rather than on a bug, and a
+        # traceback buries the one line that says which.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

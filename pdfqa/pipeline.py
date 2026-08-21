@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,7 +20,7 @@ from .config import PARSER_VERSION, PROMPT_VERSION, Config
 from .docast import DocumentTree
 from .extract import ExtractError
 from .graph import KnowledgeGraph, build_graph, merge_graphs
-from .llm import Runtime
+from .llm import BudgetExceeded, LLMError, Runtime
 from .records import Chunk, Provenance, QARecord
 from .select import (
     balance_difficulty,
@@ -50,10 +51,12 @@ class Pipeline:
     def __init__(self, config: Config, progress: Progress | None = None):
         self.cfg = config
         self.store = Store(config.cache_dir, config.cache)
-        self.runtime = Runtime(config.runtime_specs(), retries=config.runtime.retries)
+        self.runtime = Runtime(config.runtime_specs(), retries=config.runtime.retries, budget_tokens=config.runtime.budget_tokens)
         self.rng = random.Random(config.seed)
         self.progress = progress or _noop
         self.report: dict = {"documents": [], "stages": {}}
+        self._errlock = threading.Lock()
+        self._halted = False
         if config.plugins:
             self.report["plugins"] = registry.load_plugins(config.plugins)
             self.report["registered"] = registry.summary()
@@ -96,7 +99,9 @@ class Pipeline:
         if cached is not None:
             kg = KnowledgeGraph.from_dict(cached, chunks)
         else:
-            kg = build_graph(chunks, self.runtime, self.cfg.graph.llm_extract, self.cfg.graph.max_chunks)
+            kg = self._guard(
+                "graph", lambda: build_graph(chunks, self.runtime, self.cfg.graph.llm_extract, self.cfg.graph.max_chunks), None
+            ) or build_graph(chunks, self.runtime, False, self.cfg.graph.max_chunks)
             self.store.put("graph", key, kg.as_dict())
         self.progress("graph", kg.stats())
         return kg
@@ -109,7 +114,9 @@ class Pipeline:
         self.progress("synth.qa", {"records": len(records)})
 
         if s.multihop_pairs and kg.entities:
-            multihop = synth.generate_multihop(self.runtime, kg, s.multihop_pairs, s.multihop_per_pair, self.rng)
+            multihop = self._guard(
+                "synth.multihop", lambda: synth.generate_multihop(self.runtime, kg, s.multihop_pairs, s.multihop_per_pair, self.rng), []
+            )
             records.extend(multihop)
             self.progress("synth.multihop", {"records": len(multihop)})
 
@@ -151,7 +158,7 @@ class Pipeline:
             fn = registry.TASKS.get(name)
             if fn is None:
                 raise ValueError(f"unknown task {name!r}; registered: {sorted(registry.TASKS)}")
-            produced = [r for r in (fn(self.runtime, chunks, kg, self.cfg) or []) if isinstance(r, QARecord)]
+            produced = [r for r in (self._guard(f"synth.{name}", lambda: fn(self.runtime, chunks, kg, self.cfg), []) or []) if isinstance(r, QARecord)]
             for rec in produced:
                 rec.task = rec.task if rec.task != "qa" else name
             out.extend(produced)
@@ -197,7 +204,9 @@ class Pipeline:
         if cached is not None:
             self.progress("synth.cross_document", {"records": len(cached), "cached": True})
             return [QARecord.from_dict(d) for d in cached]
-        records = synth.generate_cross_document(self.runtime, corpus, n, self.cfg.synth.multihop_per_pair, self.rng)
+        records = self._guard(
+            "synth.cross_document", lambda: synth.generate_cross_document(self.runtime, corpus, n, self.cfg.synth.multihop_per_pair, self.rng), []
+        )
         self.store.put("cross_doc", key, [r.as_dict() for r in records])
         self.progress("synth.cross_document", {"records": len(records), "documents": len(graphs)})
         return records
@@ -283,6 +292,8 @@ class Pipeline:
         corpus_chunks: list[Chunk] = []
 
         for path in _expand(paths):
+            if self._halted:
+                break
             try:
                 tree = self.parse(path)
             except (ExtractError, OSError) as exc:
@@ -291,8 +302,19 @@ class Pipeline:
                 self.progress("skip", {"path": str(path), "reason": type(exc).__name__})
                 continue
             chunks = self.chunk(tree)
+            if not chunks:
+                # An image-only scan parses without error and yields nothing; without this it looks
+                # exactly like a document the generator simply found uninteresting.
+                self.report.setdefault("skipped", []).append(
+                    {"path": str(path), "reason": f"{tree.source} has no extractable text; if it is a scan, OCR it first"}
+                )
+                self.progress("skip", {"path": str(path), "reason": "no_text"})
+                continue
             kg = self.graph(chunks)
-            records = self.synthesize_cached(tree, chunks, kg)
+            try:
+                records = self.synthesize_cached(tree, chunks, kg)
+            except BudgetExceeded as exc:
+                records = self._halt(exc)
             self.report["documents"].append(
                 {"source": tree.source, "chunks": len(chunks), "graph": kg.stats(), "generated": len(records)}
             )
@@ -300,8 +322,11 @@ class Pipeline:
             graphs.append(kg)
             corpus_chunks.extend(chunks)
 
-        all_records.extend(self.cross_document(graphs, corpus_chunks))
-        self.preference_pairs(all_records)
+        try:
+            all_records.extend(self.cross_document(graphs, corpus_chunks))
+            self.preference_pairs(all_records)
+        except BudgetExceeded as exc:
+            self._halt(exc)
         kept = self.verify(all_records)
         kept = self.select(kept)
 
@@ -322,8 +347,30 @@ class Pipeline:
         self.report["files"]["run_report"] = str(_write_run_report(self.report, out))
         self.report["cache"] = self.store.stats()
         self.report["llm_calls"] = len(self.runtime.calls)
+        self.report["runtime"] = self.runtime.health()
+        self.report["files"]["run_report"] = str(_write_run_report(self.report, out))
         self.progress("done", {"records": len(kept), "outdir": self.cfg.outdir})
+        self._assert_backend_answered()
         return self.report
+
+    def _halt(self, exc: BudgetExceeded) -> list[QARecord]:
+        """Stop spending but still export: a run that hits its ceiling should hand back what it
+        already paid for, not throw it away."""
+        if not self._halted:
+            self._halted = True
+            self.report["halted"] = str(exc)
+            self.progress("halted", {"reason": str(exc)})
+        return []
+
+    def _assert_backend_answered(self) -> None:
+        """An empty dataset from a backend that never once answered is a configuration failure, and
+        exiting zero on it means the failure is not discovered until someone opens the output."""
+        health = self.report["runtime"]
+        if health["calls"] == 0 and health["failures"] > 0:
+            raise LLMError(
+                f"no model call succeeded across {health['failures']} attempts, so nothing was generated; "
+                f"first failure: {health['first_errors'][0] if health['first_errors'] else 'unknown'}"
+            )
 
     def write_splits(self, records: list[QARecord], out: Path) -> dict[str, str]:
         splits = split_records(records, tuple(self.cfg.split), self.cfg.seed)
@@ -342,13 +389,45 @@ class Pipeline:
 
     # ---------------------------------------------------------------- helpers
 
+    def _safe(self, fn, item, stage: str = ""):
+        """A single bad chunk must not kill a long run, but it must not vanish either: a swallowed
+        exception is how a wholly broken backend produced an empty dataset and a clean exit."""
+        try:
+            return fn(item)
+        except BudgetExceeded:
+            raise
+        except Exception as exc:
+            self._note(stage or getattr(fn, "__name__", "task"), exc)
+            return item if isinstance(item, QARecord) else None
+
+    def _note(self, stage: str, exc: BaseException) -> None:
+        with self._errlock:
+            errors = self.report.setdefault("errors", {"count": 0, "by_type": {}, "samples": []})
+            errors["count"] += 1
+            name = type(exc).__name__
+            errors["by_type"][name] = errors["by_type"].get(name, 0) + 1
+            if len(errors["samples"]) < 5:
+                errors["samples"].append({"stage": stage, "error": f"{name}: {exc}"[:400]})
+
+    def _guard(self, stage: str, fn, default):
+        """Stages that call the model once for the whole corpus were unprotected: a single failure in
+        multi-hop or cross-document synthesis discarded every document already paid for."""
+        try:
+            return fn()
+        except BudgetExceeded:
+            raise
+        except Exception as exc:
+            self._note(stage, exc)
+            return default
+
     def _map(self, fn, items: list, flatten: bool = False) -> list:
         workers = max(1, self.cfg.runtime.workers)
+        run = lambda i: self._safe(fn, i)
         if workers == 1 or len(items) <= 1:
-            results = [_safe(fn, i) for i in items]
+            results = [run(i) for i in items]
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                results = list(pool.map(lambda i: _safe(fn, i), items))
+                results = list(pool.map(run, items))
         if not flatten:
             return [r for r in results if r is not None]
         out = []
@@ -363,13 +442,6 @@ class Pipeline:
         if n >= len(items):
             return list(items)
         return self.rng.sample(items, n)
-
-
-def _safe(fn, item):
-    try:
-        return fn(item)
-    except Exception as exc:  # a single bad chunk must not kill a long run
-        return None if not isinstance(item, QARecord) else item
 
 
 def _has_numbers(chunk: Chunk) -> bool:
