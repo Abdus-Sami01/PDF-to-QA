@@ -1,5 +1,9 @@
 # PDF2QA
 
+[![ci](https://github.com/Abdus-Sami01/PDF2QA/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdus-Sami01/PDF2QA/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://github.com/Abdus-Sami01/PDF2QA)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Turns technical documents into verified fine-tuning datasets. It parses them into a typed AST,
 builds a knowledge graph over them, generates SFT / DPO / multi-turn / ReAct / multimodal data
 across that graph, then gates every row through grounding checks before export.
@@ -9,9 +13,12 @@ questions. That loses tables, section structure, and cross-references, and it ca
 produce single-paragraph lookup questions. This one keeps the structure and generates against it.
 
 ```bash
+git clone https://github.com/Abdus-Sami01/PDF2QA.git && cd PDF2QA
 pip install -e ".[all]"
 pdfqa run papers/ --backend ollama --model qwen2.5:7b -o dataset/
 ```
+
+The import name and CLI stay `pdfqa`.
 
 **Inputs:** PDF, Markdown, plain text, HTML, DOCX, EPUB, LaTeX source, Jupyter notebooks, CSV/TSV.
 Point it at a directory and it takes whatever it recognises — one run can span six formats. Only
