@@ -107,23 +107,47 @@ class KnowledgeGraph:
         results.sort(key=len)
         return results[:16]
 
+    def reachable(self, src: str, max_hops: int = 3):
+        """Shortest path from src to every entity within max_hops, in one breadth-first sweep."""
+        src = normalize(src)
+        seen, frontier = {src}, [(src, [])]
+        for _ in range(max_hops):
+            nxt = []
+            for node, path in frontier:
+                for edge in self.adj.get(node, []):
+                    if edge.dst in seen:
+                        continue
+                    seen.add(edge.dst)
+                    extended = path + [edge]
+                    nxt.append((edge.dst, extended))
+                    yield edge.dst, extended
+            frontier = nxt
+
     def bridging_pairs(self, min_gap: int = 1, limit: int = 64) -> list[tuple[Entity, Entity, list[Edge]]]:
-        """Entity pairs that are graph-connected but live in different chunks — multi-hop seeds."""
-        out = []
-        keys = list(self.entities)
-        for i, a in enumerate(keys):
-            ea = self.entities[a]
-            for b in keys[i + 1 :]:
-                eb = self.entities[b]
-                if ea.chunk_ids & eb.chunk_ids:
+        """Entity pairs that are graph-connected but live in different chunks — multi-hop seeds.
+
+        Walks outward from each entity rather than testing every pair. Pairing every entity with
+        every other and searching for a path between them is quadratic, and on a sparse graph almost
+        all of that work is spent proving that unrelated entities are unrelated: a corpus graph with
+        twenty thousand entities took hours to return its sixty-four pairs.
+        """
+        rank = {key: i for i, key in enumerate(self.entities)}
+        found: dict[tuple[str, str], list[Edge]] = {}
+        for a, ea in self.entities.items():
+            if not ea.chunk_ids:
+                continue
+            for b, path in self.reachable(a, max_hops=3):
+                eb = self.entities.get(b)
+                if eb is None or not eb.chunk_ids or ea.chunk_ids & eb.chunk_ids or len(path) <= min_gap:
                     continue
-                if not ea.chunk_ids or not eb.chunk_ids:
-                    continue
-                path = self.paths(a, b, max_hops=3)
-                if path and len(path[0]) > min_gap:
-                    out.append((ea, eb, path[0]))
-        out.sort(key=lambda t: (len(t[2]), -len(t[0].chunk_ids | t[1].chunk_ids)))
-        return out[:limit]
+                pair = (a, b) if rank[a] < rank[b] else (b, a)
+                if pair not in found or len(path) < len(found[pair]):
+                    found[pair] = path
+        ordered = sorted(
+            found.items(),
+            key=lambda kv: (len(kv[1]), -len(self.entities[kv[0][0]].chunk_ids | self.entities[kv[0][1]].chunk_ids), rank[kv[0][0]], rank[kv[0][1]]),
+        )
+        return [(self.entities[a], self.entities[b], path) for (a, b), path in ordered[:limit]]
 
     def chunks_for(self, *entity_keys: str) -> list[Chunk]:
         ids: set[str] = set()
@@ -380,9 +404,12 @@ def cross_document_pairs(kg: KnowledgeGraph, limit: int = 32) -> list[tuple[Enti
     """
     out: list[tuple[Entity, Entity, list[Edge]]] = []
     seen: set[tuple[str, str]] = set()
+    # Every entity's sources are read once here, once per incident edge, and twice per comparison in
+    # the sort below; recomputing the set each time walks that entity's chunks over and over.
+    sources: dict[str, set[str]] = {key: source_of(kg, ent) for key, ent in kg.entities.items()}
 
     for ent in kg.entities.values():
-        if len(source_of(kg, ent)) > 1:
+        if len(sources.get(ent.key, ())) > 1:
             out.append((ent, ent, []))
             seen.add((ent.key, ent.key))
 
@@ -393,12 +420,12 @@ def cross_document_pairs(kg: KnowledgeGraph, limit: int = 32) -> list[tuple[Enti
         sig = tuple(sorted((a.key, b.key)))
         if sig in seen:
             continue
-        sa, sb = source_of(kg, a), source_of(kg, b)
+        sa, sb = sources.get(a.key, set()), sources.get(b.key, set())
         if sa and sb and not (sa & sb):
             seen.add(sig)
             out.append((a, b, [edge]))
 
-    out.sort(key=lambda t: (-len(source_of(kg, t[0]) | source_of(kg, t[1])), -len(t[0].chunk_ids)))
+    out.sort(key=lambda t: (-len(sources.get(t[0].key, set()) | sources.get(t[1].key, set())), -len(t[0].chunk_ids)))
     return out[:limit]
 
 

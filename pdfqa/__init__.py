@@ -16,7 +16,7 @@ from .registry import register_adapter, register_format, register_task
 from .retrieve import Index, answer
 from .tools import execute
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 __all__ = [
     "BudgetExceeded",

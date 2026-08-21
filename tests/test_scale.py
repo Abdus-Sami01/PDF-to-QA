@@ -6,8 +6,9 @@ import time
 import pytest
 
 from pdfqa.chunking import chunk_tree
+from pdfqa.graph import KnowledgeGraph
 from pdfqa.llm import hashed_embedding
-from pdfqa.records import Provenance, QARecord
+from pdfqa.records import Chunk, Provenance, QARecord
 from pdfqa.select import EXACT_LIMIT, HyperplaneIndex, cosine, dedup_semantic, dpp_select, normalize
 from pdfqa.synth import generate_qa
 
@@ -244,3 +245,71 @@ def test_preference_modes_are_drawn_deterministically(config, tmp_path):
     outcomes = {tuple(modes_for_one_run()) for _ in range(3)}
     assert len(outcomes) == 1
     assert any(outcomes.pop())
+
+
+# ------------------------------------------------------------------ graph scaling
+
+
+def kg_with(entities: int, seed: int, chunks: int = 40, density: int = 2):
+    rng = random.Random(seed)
+    kg = KnowledgeGraph()
+    pool = []
+    for i in range(chunks):
+        c = Chunk(text=f"c{i}", prov=Provenance(source=f"doc{i % 5}.pdf"))
+        pool.append(c)
+        kg.chunk_index[c.id] = c
+    names = [f"entity number {i}" for i in range(entities)]
+    for name in names:
+        kg.add_entity(name, "method", rng.choice(pool))
+    for _ in range(entities * density):
+        a, b = rng.sample(names, 2)
+        kg.add_edge(a, b, "relates", rng.choice(pool).id)
+    return kg
+
+
+def brute_bridging(kg, min_gap: int = 1, limit: int = 64):
+    """The pair-by-pair definition, kept as the reference the fast path must agree with."""
+    out, keys = [], list(kg.entities)
+    for i, a in enumerate(keys):
+        ea = kg.entities[a]
+        for b in keys[i + 1 :]:
+            eb = kg.entities[b]
+            if ea.chunk_ids & eb.chunk_ids or not ea.chunk_ids or not eb.chunk_ids:
+                continue
+            path = kg.paths(a, b, max_hops=3)
+            if path and len(path[0]) > min_gap:
+                out.append((ea, eb, path[0]))
+    out.sort(key=lambda t: (len(t[2]), -len(t[0].chunk_ids | t[1].chunk_ids)))
+    return out[:limit]
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_fast_bridging_finds_exactly_the_pairs_the_definition_does(seed):
+    kg = kg_with(60, seed)
+    expected = {tuple(sorted((a.name, b.name))): len(p) for a, b, p in brute_bridging(kg)}
+    actual = {tuple(sorted((a.name, b.name))): len(p) for a, b, p in kg.bridging_pairs()}
+    assert actual == expected
+
+
+def test_bridging_pairs_does_not_blow_up_on_a_corpus_sized_graph():
+    """Testing every pair and searching for a path between them is quadratic, and nearly all of that
+    work goes into proving unrelated entities are unrelated. This used to take hours."""
+    kg = kg_with(4000, seed=1, chunks=200, density=2)
+    start = time.perf_counter()
+    pairs = kg.bridging_pairs()
+    assert pairs
+    assert time.perf_counter() - start < 10.0
+
+
+def test_reachable_returns_shortest_paths():
+    kg = KnowledgeGraph()
+    chunk = Chunk(text="c", prov=Provenance(source="d.pdf"))
+    kg.chunk_index[chunk.id] = chunk
+    for name in ("alpha", "beta", "gamma"):
+        kg.add_entity(name, "method", chunk)
+    kg.add_edge("alpha", "beta", "r", chunk.id)
+    kg.add_edge("beta", "gamma", "r", chunk.id)
+    kg.add_edge("alpha", "gamma", "r", chunk.id)
+
+    hops = {key: len(path) for key, path in kg.reachable("alpha")}
+    assert hops == {"beta": 1, "gamma": 1}

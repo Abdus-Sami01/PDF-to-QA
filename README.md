@@ -91,6 +91,13 @@ and is told to compare, reconcile, or flag disagreement — attributing each fac
 came from. On the bundled fixtures that produces, unprompted, a question about the two papers
 reporting 74.8 and 72.9 for the same configuration and why they differ.
 
+Finding those pairs walks outward from each entity rather than testing every pair. The pairwise
+version is quadratic and spends nearly all of its time proving that unrelated entities are
+unrelated — fine for one paper's few hundred entities, hours for a corpus graph built from hundreds
+of documents, all to return sixty-four seeds. On a 4,000-entity graph the outward walk finishes in
+under a second where the pairwise version needs about five minutes; both return the same pairs, and
+a test asserts that against the pairwise definition on random graphs.
+
 **Several data shapes, not just Q&A:**
 
 | Shape | What you get |
