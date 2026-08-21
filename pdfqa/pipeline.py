@@ -225,15 +225,38 @@ class Pipeline:
         self._generated = list(records)
         if not v.enabled:
             return records
+        # By the project's own cost model verification is roughly four of every five model calls,
+        # and it was the one expensive stage with no checkpoint: a crash here re-paid all of it.
+        fresh = []
+        for rec in records:
+            cached = self.store.get("verify", self._verify_key(rec))
+            if cached is None:
+                fresh.append(rec)
+            else:
+                _apply_verification(rec, cached)
         self._map(
             lambda r: verifier.verify(r, self.runtime, v.model_gates, v.symbolic, v.consistency_samples, v.allow_exec, v.z3),
-            records,
+            fresh,
         )
+        for rec in fresh:
+            self.store.put("verify", self._verify_key(rec), _verification_of(rec))
+        self.progress("verify.cache", {"reused": len(records) - len(fresh), "computed": len(fresh)})
         kept = [r for r in records if r.accepted and r.scores.get("quality", 0.0) >= v.min_quality]
         self.progress("verify", {"kept": len(kept), "rejected": len(records) - len(kept)})
         self.report["stages"]["rejections"] = _rejection_counts(records)
         self._verified = list(kept)
         return kept
+
+    def _verify_key(self, rec: QARecord) -> str:
+        """Keyed on everything the gates actually read. `rec.id` is only source plus question and
+        answer, so two records that differ solely in context or tool trace share it — and the second
+        would inherit the first's verdict instead of being judged on its own evidence."""
+        v = self.cfg.verify
+        subject = [
+            rec.task, rec.question, rec.answer, rec.context,
+            [(t.role, t.content) for t in rec.turns], rec.tool_trace, sorted(rec.images),
+        ]
+        return fingerprint(subject, PROMPT_VERSION, v.__dict__, self.cfg.runtime.verify, self.cfg.runtime.generate)
 
     def yield_report(self, final: list[QARecord]) -> dict:
         """Where records were lost, per shape.
@@ -446,6 +469,22 @@ class Pipeline:
 
 def _has_numbers(chunk: Chunk) -> bool:
     return any(ch.isdigit() for ch in chunk.text)
+
+
+def _verification_of(rec: QARecord) -> dict:
+    return {
+        "scores": dict(rec.scores),
+        "verification": list(rec.prov.verification),
+        "flags": [f for f in rec.flags if f.startswith("reject:")],
+    }
+
+
+def _apply_verification(rec: QARecord, cached: dict) -> None:
+    """Replace rather than append: verification runs once per record, and replaying a cached result
+    onto flags that already hold it would reject the record twice over."""
+    rec.scores.update(cached["scores"])
+    rec.prov.verification = list(cached["verification"])
+    rec.flags = [f for f in rec.flags if not f.startswith("reject:")] + list(cached["flags"])
 
 
 def _gate_stats(records: list[QARecord]) -> dict:

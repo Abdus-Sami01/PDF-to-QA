@@ -185,3 +185,69 @@ def test_png_writer_emits_a_valid_header(tmp_path):
     assert data[12:16] == b"IHDR"
     assert int.from_bytes(data[16:20], "big") == 2
     assert data[-8:-4] == b"IEND"
+
+
+# ------------------------------------------------------------------ verification checkpoint
+
+
+def test_verification_is_not_re_paid_on_a_second_run(config):
+    """Verification is roughly four of every five model calls, and was the one expensive stage with
+    no checkpoint: a crash during or after it re-paid all of it."""
+    config.cache = True
+    first = Pipeline(config)
+    first.run()
+    verify_calls = sum(1 for c in first.runtime.calls if c["role"] == "verify")
+    assert verify_calls > 0, "fixture never exercised the model gates"
+
+    second = Pipeline(config)
+    second.run()
+    assert sum(1 for c in second.runtime.calls if c["role"] == "verify") == 0
+
+
+def test_a_resumed_run_reaches_the_same_verdicts(config):
+    config.cache = True
+    first = Pipeline(config).run()
+    second = Pipeline(config).run()
+    assert second["stats"]["count"] == first["stats"]["count"]
+    assert second["yield"] == first["yield"]
+    assert second["gates"] == first["gates"]
+
+
+def test_changing_the_gate_settings_re_verifies(config):
+    """A cached verdict is only valid for the configuration that produced it."""
+    config.cache = True
+    Pipeline(config).run()
+    config.verify.min_quality = 0.0
+    config.verify.consistency_samples = 2
+
+    second = Pipeline(config)
+    second.run()
+    assert sum(1 for c in second.runtime.calls if c["role"] == "verify") > 0
+
+
+def test_replaying_a_cached_verdict_does_not_reject_twice():
+    from pdfqa.pipeline import _apply_verification, _verification_of
+
+    rec = QARecord(question="q", answer="a", context="c", prov=Provenance(source="s.md"))
+    rec.flags.append("reject:nli_forward")
+    rec.scores["quality"] = 0.2
+    rec.prov.verification.append({"stage": "nli_forward", "passed": False})
+
+    snapshot = _verification_of(rec)
+    _apply_verification(rec, snapshot)
+    _apply_verification(rec, snapshot)
+
+    assert rec.flags.count("reject:nli_forward") == 1
+    assert len(rec.prov.verification) == 1
+    assert rec.accepted is False
+
+
+def test_records_differing_only_in_context_are_verified_separately(config):
+    """Keying the cache on rec.id let a record inherit a verdict earned on someone else's evidence:
+    id is source plus question and answer, and gates read the context and the tool trace too."""
+    pipeline = Pipeline(config)
+    a = QARecord(question="q", answer="a", context="routing improves latency", prov=Provenance(source="s.md"))
+    b = QARecord(question="q", answer="a", context="an unrelated passage", prov=Provenance(source="s.md"))
+
+    assert a.id == b.id
+    assert pipeline._verify_key(a) != pipeline._verify_key(b)

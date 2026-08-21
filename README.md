@@ -425,10 +425,17 @@ so it works against datasets you exported for a trainer rather than kept in nati
 
 ## Incremental
 
-Every stage is content-addressed, including synthesis — the expensive one. Change a prompt and only
-synthesis re-runs; change the parser and only extraction re-runs. Adding a PDF to a directory of 500
-doesn't reprocess the other 499, and a run that dies halfway resumes from the documents it finished
-instead of paying for them twice.
+Every stage is content-addressed, including the two expensive ones — synthesis and verification.
+Change a prompt and only synthesis re-runs; change the parser and only extraction re-runs. Adding a
+PDF to a directory of 500 doesn't reprocess the other 499, and a run that dies halfway resumes from
+the documents it finished instead of paying for them twice.
+
+Verification is the larger half of that bill — by the plan above, 450 of 566 calls — and it runs
+once over the whole corpus at the end, so a crash during export used to re-pay every gate on the
+next run. Verdicts are now cached per record, keyed on everything the gates actually read: question,
+answer, context, turns, tool trace, images, and the gate settings themselves. Loosen a threshold or
+turn on self-consistency and the affected records re-verify; leave the config alone and a resumed run
+makes no verification calls at all.
 
 ```bash
 pdfqa cache            # what's stored
