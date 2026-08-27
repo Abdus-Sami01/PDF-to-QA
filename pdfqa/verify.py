@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -347,25 +348,43 @@ def z3_available() -> bool:
     return True
 
 
-_Z3_LOCK = threading.Lock()
+_Z3_POOL: ThreadPoolExecutor | None = None
+_Z3_POOL_LOCK = threading.Lock()
+
+
+def _z3_pool() -> ThreadPoolExecutor:
+    """One thread, created once, that owns every z3 object for its whole lifetime.
+
+    A plain lock around the solver is not enough, and that is not a theoretical gap: the solver
+    outlives the critical section, so its C++ teardown runs later on whichever thread the garbage
+    collector happens to be on, and z3 aborts the process instead of raising. It reproduced as an
+    intermittent SIGSEGV — about one run in three over a 120-document corpus with four workers.
+    Confining creation and destruction to a single thread is what actually fixes it.
+    """
+    global _Z3_POOL
+    with _Z3_POOL_LOCK:
+        if _Z3_POOL is None:
+            _Z3_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdfqa-z3")
+        return _Z3_POOL
+
+
+def _z3_solve_here(constraints: str, timeout: float) -> tuple[str, str]:
+    import z3  # type: ignore
+
+    solver = z3.Solver()
+    solver.set("timeout", int(timeout * 1000))
+    solver.from_string(constraints if "(check-sat)" not in constraints else constraints.replace("(check-sat)", ""))
+    # str() before returning: a z3 object handed back to the caller would be released off-thread,
+    # which is the whole failure this indirection exists to prevent.
+    return str(solver.check()), ""
 
 
 def z3_solve(constraints: str, timeout: float = 10.0) -> tuple[str, str]:
-    """Return (sat|unsat|unknown|error, detail) for an SMT-LIB 2 fragment.
-
-    Serialised: z3's parser shares global AST state, and calling it from several worker threads
-    aborts the whole process rather than raising.
-    """
-    try:
-        import z3  # type: ignore
-    except ImportError:
+    """Return (sat|unsat|unknown|error, detail) for an SMT-LIB 2 fragment."""
+    if not z3_available():
         return "unknown", "z3 not installed"
     try:
-        with _Z3_LOCK:
-            solver = z3.Solver()
-            solver.set("timeout", int(timeout * 1000))
-            solver.from_string(constraints if "(check-sat)" not in constraints else constraints.replace("(check-sat)", ""))
-            return str(solver.check()), ""
+        return _z3_pool().submit(_z3_solve_here, constraints, timeout).result(timeout=timeout + 30.0)
     except Exception as exc:
         return "error", str(exc)[:300]
 

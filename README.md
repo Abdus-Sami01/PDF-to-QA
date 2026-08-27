@@ -137,7 +137,10 @@ so the gate still rejects them.
 - *Symbolic check* — quantitative claims get compiled to Python and executed in a restricted
   subprocess
 - *Z3* — the same claim is encoded as SMT-LIB constraints; it passes only if the constraints are
-  satisfiable **and** their negation is unsatisfiable, which is entailment rather than mere consistency
+  satisfiable **and** their negation is unsatisfiable, which is entailment rather than mere
+  consistency. Every solver object is created and destroyed on one dedicated thread: a lock around
+  the solver is not enough, because it outlives the critical section and its teardown then runs on
+  whichever thread the collector is on, which aborts the process outright rather than raising
 - *Trace execution* — every tool call in a ReAct trace re-run and compared
 - *Turn coherence* — dialogues checked for alternation, empty turns, and assistant turns that drift off source
 - *Self-consistency* — optional re-answer voting

@@ -1,9 +1,14 @@
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import pytest
 
 from pdfqa.records import Provenance, QARecord, Turn
 from pdfqa.synth import repair_trace
 from pdfqa.tools import execute, observations_agree, run_lookup, run_sql
-from pdfqa.verify import trace_execution, turn_coherence
+from pdfqa.verify import trace_execution, turn_coherence, z3_available, z3_solve
 
 GRID = [
     ["Model", "Params", "Accuracy", "Latency (ms)"],
@@ -240,3 +245,48 @@ def test_a_number_no_tool_produced_is_still_rejected():
     )
     verify(rec, runtime=None, use_model_gates=False)
     assert "reject:numeric_grounding" in rec.flags
+
+
+# ------------------------------------------------------------------ solver thread safety
+
+
+@pytest.mark.skipif(not z3_available(), reason="z3 not installed")
+def test_every_solver_call_runs_on_the_one_solver_thread(monkeypatch):
+    """The invariant behind the fix, checked directly because the bug it prevents is probabilistic.
+
+    Holding a lock around the solver still let it be destroyed later on whichever thread the
+    collector was on, which aborts the process instead of raising — an intermittent SIGSEGV, about
+    one run in three over a 120-document corpus. Creating and destroying every z3 object on one
+    dedicated thread is what fixes it, so that is what this asserts.
+    """
+    import threading as th
+
+    from pdfqa import verify as V
+
+    seen: list[str] = []
+    real = V._z3_solve_here
+
+    def spy(constraints, timeout):
+        seen.append(th.current_thread().name)
+        return real(constraints, timeout)
+
+    monkeypatch.setattr(V, "_z3_solve_here", spy)
+
+    def work(k):
+        V.z3_solve(f"(declare-const x{k} Real)(assert (> x{k} {k}.5))")
+
+    threads = [th.Thread(target=work, args=(k,), name=f"caller-{k}") for k in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+
+    assert len(seen) == 6
+    assert len(set(seen)) == 1, f"solver ran on several threads: {sorted(set(seen))}"
+    assert seen[0].startswith("pdfqa-z3")
+    assert not seen[0].startswith("caller-")
+
+
+@pytest.mark.skipif(not z3_available(), reason="z3 not installed")
+def test_the_solver_still_decides_correctly():
+    assert z3_solve("(declare-const x Real)(assert (> x 3.0))")[0] == "sat"
+    assert z3_solve("(declare-const x Real)(assert (> x 3.0))(assert (< x 1.0))")[0] == "unsat"
+    assert z3_solve("this is not smt-lib at all")[0] == "error"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdfqa"
-version = "1.8.0"
+version = "1.8.1"
 description = "Neuro-symbolic, graph-aware synthetic data engine: turns PDF, DOCX, HTML, LaTeX, EPUB and notebooks into verified fine-tuning datasets, retrieval corpora and eval splits"
 readme = "README.md"
 requires-python = ">=3.10"
