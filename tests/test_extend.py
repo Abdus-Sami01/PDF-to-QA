@@ -210,3 +210,61 @@ def test_plan_command_prints_a_table(capsys):
 def test_plan_command_without_inputs_fails(capsys):
     assert main(["plan"]) == 1
     assert "no inputs" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ estimate against reality
+
+
+def _run_and_plan(config, rates_from_the_run: bool):
+    from collections import Counter
+
+    from pdfqa.plan import rates_from_report
+
+    config.inputs = [str(FIXTURES / "sample.md"), str(FIXTURES / "sample2.md")]
+    config.formats = ["raw"]
+    config.cache = False
+
+    pipeline = Pipeline(config)
+    report = pipeline.run()
+    actual = Counter(c["role"] for c in pipeline.runtime.calls)
+
+    chunks = collect_chunks(config, [Path(p) for p in config.inputs])
+    plan = estimate(config, chunks, rates_from_report(report) if rates_from_the_run else None)
+    predicted = {role: v["calls"] for role, v in plan.by_role().items()}
+    return plan, predicted, actual
+
+
+def test_the_estimate_matches_the_run_once_the_funnel_is_measured(config):
+    """Verification is the dominant stage and it short-circuits: cheap gates cost nothing and run
+    first, the model gates see only what survived them, and symbolic and z3 only what is still
+    passing. Charging every record for every gate predicted 450 calls against 251 actually made."""
+    plan, predicted, actual = _run_and_plan(config, rates_from_the_run=True)
+
+    assert plan.measured
+    assert predicted["verify"] / actual["verify"] < 1.35
+    assert sum(predicted.values()) / sum(actual.values()) < 1.3
+
+
+def test_without_a_previous_run_the_estimate_is_an_upper_bound(config):
+    """It must never come in under the real cost, and must say that it is a ceiling."""
+    plan, predicted, actual = _run_and_plan(config, rates_from_the_run=False)
+
+    assert not plan.measured
+    assert predicted["verify"] >= actual["verify"]
+    assert "upper bound" in format_plan(plan)
+    assert "upper bound" not in format_plan(_run_and_plan(config, rates_from_the_run=True)[0])
+
+
+def test_measured_rates_never_exceed_one():
+    from pdfqa.plan import rates_from_report
+
+    rates = rates_from_report({"gates": {"structural": {"pass": 10, "fail": 0},
+                                         "nli_forward": {"pass": 40, "fail": 0}}})
+    assert all(0.0 <= v <= 1.0 for v in rates.values())
+
+
+def test_rates_from_an_empty_report_fall_back_to_the_upper_bound():
+    from pdfqa.plan import DEFAULT_RATES, rates_from_report
+
+    assert rates_from_report({}) == DEFAULT_RATES
+    assert rates_from_report({"gates": {}}) == DEFAULT_RATES

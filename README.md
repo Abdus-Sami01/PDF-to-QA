@@ -257,9 +257,24 @@ total                          566       272,854       132,020
 estimated cost at $3.0/M in, $15.0/M out: $2.80
 ```
 
-450 of 566 calls are verification. That's the knob to turn if a run is too expensive — drop
-`verify.z3` or `verify.symbolic` and re-plan before committing. Prices are yours to supply rather
-than baked in, since published rates change and a stale table would be worse than none.
+Verification dominates, and that's the knob to turn if a run is too expensive — drop `verify.z3` or
+`verify.symbolic` and re-plan before committing. Prices are yours to supply rather than baked in,
+since published rates change and a stale table would be worse than none.
+
+That 566 is a **ceiling, not a forecast**, and the output says so. Gating is a funnel: the cheap
+gates cost nothing and run first, the model gates see only records that survived them, and symbolic
+and z3 only records still passing after that. Charging every record for every gate predicted 450
+verification calls on the bundled fixtures where the run actually made 251 — 1.6x over on the total,
+which is enough to talk you out of a run you could afford.
+
+Point one at a previous run and the funnel is priced from what that run's gates actually did:
+
+```bash
+pdfqa plan papers/ --from-run dataset/ --price-in 3 --price-out 15
+```
+
+On the same fixtures that takes the total from 1.58x over to 1.11x. Without it the figure stays an
+upper bound, which is the honest default: it will never come in under the real cost.
 
 An estimate isn't a limit, so runs also take a hard ceiling. It stops generating and exports what it
 already paid for, rather than throwing the run away:

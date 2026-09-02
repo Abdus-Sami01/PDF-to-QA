@@ -45,6 +45,8 @@ class Plan:
     documents: list[dict] = field(default_factory=list)
     stages: list[StageCost] = field(default_factory=list)
     chunks: int = 0
+    measured: bool = False
+    """True when the verification funnel came from a previous run rather than the upper bound."""
 
     def add(self, stage: str, calls: int, prompt: int, completion: int, role: str = "generate") -> None:
         if calls > 0:
@@ -85,8 +87,10 @@ class Plan:
         return out
 
 
-def estimate(config: Config, chunks_by_doc: dict[str, list[Chunk]]) -> Plan:
+def estimate(config: Config, chunks_by_doc: dict[str, list[Chunk]], rates: dict | None = None) -> Plan:
     plan = Plan()
+    rates = {**DEFAULT_RATES, **(rates or {})}
+    plan.measured = rates != DEFAULT_RATES
     s, v = config.synth, config.verify
     all_chunks = [c for chunks in chunks_by_doc.values() for c in chunks]
     plan.chunks = len(all_chunks)
@@ -137,11 +141,48 @@ def estimate(config: Config, chunks_by_doc: dict[str, list[Chunk]]) -> Plan:
     plan.add("dpo", dpo_calls, dpo_calls * (mean_chunk + PROMPT_OVERHEAD), dpo_calls * ANSWER_TOKENS["dpo"])
 
     if v.enabled and v.model_gates:
-        gates = 3 + (1 if v.symbolic else 0) + (1 if v.z3 else 0) + v.consistency_samples
-        calls = records * gates
+        # Gating is a funnel, not a fixed battery. Cheap gates cost nothing and run first; the model
+        # gates run only for records that survived them, and symbolic and z3 only for records still
+        # passing after that. Charging every record for every gate overstates the dominant stage —
+        # on the bundled fixtures, 450 predicted calls against 251 actually made.
+        reaching_model = records * rates["cheap"]
+        calls = reaching_model * (3 + v.consistency_samples)
+        if v.symbolic:
+            calls += reaching_model * rates["model"]
+            if v.z3:
+                calls += reaching_model * rates["model"] * rates["symbolic"]
+        calls = int(round(calls))
         plan.add("verify", calls, calls * (mean_chunk + PROMPT_OVERHEAD), calls * VERIFY_TOKENS, role="verify")
 
     return plan
+
+
+DEFAULT_RATES = {"cheap": 1.0, "model": 1.0, "symbolic": 1.0}
+"""With no measurements to go on, assume nothing is filtered out. That makes the figure an upper
+bound rather than a guess dressed up as a point estimate; `rates_from_report` replaces it with what
+a previous run of the same shape actually did."""
+
+
+def rates_from_report(report: dict) -> dict:
+    """Survival rates at each step of the funnel, taken from a previous run's gate counts."""
+    gates = report.get("gates") or {}
+
+    def ran(name: str) -> int:
+        counts = gates.get(name) or {}
+        return counts.get("pass", 0) + counts.get("fail", 0) + counts.get("inconclusive", 0)
+
+    def passed(name: str) -> int:
+        return (gates.get(name) or {}).get("pass", 0)
+
+    generated = max(ran("structural"), 1)
+    model_stage = ran("nli_forward") + ran("visual_grounding")
+    rates = dict(DEFAULT_RATES)
+    rates["cheap"] = min(1.0, model_stage / generated) if model_stage else DEFAULT_RATES["cheap"]
+    if model_stage:
+        rates["model"] = min(1.0, ran("symbolic") / model_stage) if ran("symbolic") else DEFAULT_RATES["model"]
+    if ran("symbolic"):
+        rates["symbolic"] = min(1.0, ran("z3") / ran("symbolic")) if ran("z3") else DEFAULT_RATES["symbolic"]
+    return rates
 
 
 def collect_chunks(config: Config, paths: list[Path]) -> dict[str, list[Chunk]]:
@@ -168,4 +209,10 @@ def format_plan(plan: Plan, price_in: float = 0.0, price_out: float = 0.0) -> st
         lines.append(f"estimated cost at ${price_in}/M in, ${price_out}/M out: ${plan.cost(price_in, price_out):,.2f}")
     lines.append("")
     lines.append("Estimates assume no cache hits and full generation; a resumed run costs less.")
+    lines.append(
+        "Verification rates measured from a previous run."
+        if plan.measured
+        else "Verification is charged as if no record is ever filtered out, so the total is an upper "
+             "bound; pass --from-run to price it from a previous run's gate counts."
+    )
     return "\n".join(lines)
