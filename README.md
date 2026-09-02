@@ -358,6 +358,19 @@ are on: cosine gives *every* passage a nonzero score, so without a floor an off-
 still retrieves five confident-looking passages and invites a confident wrong answer. Below the
 floor the answer is a refusal and the exit code is 2.
 
+Search stays usable as the corpus grows, which took two changes rather than the one I expected.
+Above a few thousand passages the dense half scores against random-projection buckets instead of
+every vector — the same index the semantic dedup uses. On its own that barely helped, because BM25
+was handing the dense half nearly every passage as a candidate: a term appearing in almost every
+passage has an IDF of about zero and changes no ranking, yet it still pulled in every passage, and
+each one then cost a cosine. Those terms are now skipped for candidate generation, though only when
+a selective term survives, so a query built entirely of common words still retrieves something.
+
+Together, on passages cut from real technical prose, that is 246 → 120 ms per query at 20,000
+passages and 815 → 395 ms at 60,000, with no measured loss: recall@5 against the exact scan is 100%
+and the top hit is identical on every query tried. Below the threshold the exact scan is kept, so
+small corpora behave exactly as before. `eval` benefits most — it issues one query per record.
+
 ## Evaluating a model on what came out
 
 ```bash

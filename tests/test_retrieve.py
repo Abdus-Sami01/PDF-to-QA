@@ -1,3 +1,5 @@
+import random
+import re
 import json
 from pathlib import Path
 
@@ -9,7 +11,8 @@ from pdfqa.evaluate import evaluate, grade_one, numeric_match, token_f1
 from pdfqa.export import load_records
 from pdfqa.pipeline import Pipeline
 from pdfqa.records import Provenance, QARecord
-from pdfqa.retrieve import Index, Passage, answer, terms
+from pdfqa.select import EXACT_LIMIT
+from pdfqa.retrieve import COMMON_TERM_FLOOR, Index, Passage, answer, terms
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -213,3 +216,73 @@ def test_eval_command_prints_a_summary(dataset, capsys):
 def test_eval_command_on_an_empty_directory_fails_cleanly(tmp_path, capsys):
     assert main(["eval", str(tmp_path)]) == 1
     assert "no raw.jsonl" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ retrieval at corpus scale
+
+
+def prose_passages(n: int, seed: int = 3):
+    """Passages cut from this repository's own prose, so term frequencies are realistic.
+
+    A synthetic vocabulary makes this measurement meaningless in both directions: uniform terms
+    invent a bottleneck that real text does not have, and a hand-made Zipf curve invents stop words
+    the STOP list would already have removed.
+    """
+    words = re.findall(
+        r"[A-Za-z][A-Za-z'-]+",
+        "\n".join(f.read_text(errors="ignore") for f in sorted(Path(__file__).resolve().parent.parent.rglob("*.py")) if ".git" not in str(f)),
+    )
+    rng = random.Random(seed)
+    passages, queries = [], []
+    for i in range(n):
+        start = rng.randrange(0, max(1, len(words) - 130))
+        passages.append(Passage(id=f"p{i}", text=" ".join(words[start : start + 120]), source="d.pdf"))
+    for _ in range(20):
+        start = rng.randrange(0, max(1, len(words) - 12))
+        queries.append(" ".join(words[start : start + 9]))
+    return passages, queries
+
+
+def test_bucketed_search_returns_what_the_exact_scan_returns():
+    """The fast path is approximate, so it is only worth having if it agrees with the slow one."""
+    passages, queries = prose_passages(EXACT_LIMIT + 2000)
+    index = Index(passages)
+    index.embed()
+    assert index.dense_index is not None, "corpus large enough should use the bucketed path"
+
+    approximate = [[h.passage.id for h in index.search(q, k=5)] for q in queries]
+    index.dense_index = None
+    exact = [[h.passage.id for h in index.search(q, k=5)] for q in queries]
+
+    found = sum(len(set(a) & set(e)) for a, e in zip(approximate, exact))
+    total = sum(len(e) for e in exact)
+    assert total and found / total >= 0.95, f"recall@5 fell to {found}/{total}"
+
+
+def test_a_small_corpus_still_scans_exactly():
+    passages, _ = prose_passages(50)
+    index = Index(passages)
+    index.embed()
+    assert index.dense_index is None
+
+
+def test_near_universal_terms_do_not_drag_in_every_passage():
+    """A term in almost every passage has an IDF of about zero, so it changes no ranking — but it
+    used to make every passage a candidate, and each candidate costs a cosine and a Hit."""
+    passages = [Passage(id=f"p{i}", text=f"boilerplate header everywhere token{i} unique{i}", source="d.pdf")
+                for i in range(COMMON_TERM_FLOOR + 500)]
+    index = Index(passages)
+
+    assert len(index.bm25("boilerplate header everywhere")) == len(passages)
+    narrowed = index.bm25("boilerplate header everywhere token7")
+    assert len(narrowed) < len(passages) / 10
+    assert index.passages[7].id in {index.passages[i].id for i in narrowed}
+
+
+def test_a_query_of_only_common_terms_still_retrieves():
+    """Dropping the common terms unconditionally would return nothing for such a query."""
+    passages = [Passage(id=f"p{i}", text=f"boilerplate header everywhere token{i}", source="d.pdf")
+                for i in range(COMMON_TERM_FLOOR + 500)]
+    index = Index(passages)
+    assert index.bm25("boilerplate header everywhere")
+    assert index.search("boilerplate header everywhere", k=3)

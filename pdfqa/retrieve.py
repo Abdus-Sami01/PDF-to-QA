@@ -16,10 +16,16 @@ from pathlib import Path
 
 from .llm import Runtime, Vector, hashed_embedding
 from .prompts import GROUNDED_ANSWER
-from .select import cosine, normalize
+from .select import EXACT_LIMIT, HyperplaneIndex, cosine, normalize
 from .verify import STOP
 
 WORD = re.compile(r"[A-Za-z0-9_.%-]+")
+
+MAX_DOC_FRACTION = 0.5
+"""A term in more than this share of passages is treated as a stop word for candidate generation."""
+
+COMMON_TERM_FLOOR = 1000
+"""Below this many passages, every term looks common; the corpus is small enough to scan anyway."""
 
 
 def terms(text: str) -> list[str]:
@@ -72,22 +78,42 @@ class Index:
                 self.postings[term].append((i, n))
         self.avg_len = sum(self.lengths) / max(1, len(self.lengths))
         self.n = len(passages)
+        self.dense_index: HyperplaneIndex | None = None
 
     def embed(self, runtime: Runtime | None = None) -> None:
         texts = [p.text[:2000] for p in self.passages]
         self.vectors = [normalize(v) for v in (runtime.embed(texts) if runtime else [hashed_embedding(t) for t in texts])]
+        self.dense_index = None
+        if len(self.vectors) > EXACT_LIMIT:
+            # Scoring every passage against the query is linear per query, which a corpus of a few
+            # hundred papers turns into most of a second — and `eval` issues one query per record.
+            self.dense_index = HyperplaneIndex(len(self.vectors[0]))
+            for i, v in enumerate(self.vectors):
+                self.dense_index.add(i, v)
 
     def bm25(self, query: str) -> dict[int, float]:
         scores: dict[int, float] = defaultdict(float)
-        for term in set(terms(query)):
-            posting = self.postings.get(term)
-            if not posting:
-                continue
+        for term, posting in self._query_postings(query):
             idf = math.log(1 + (self.n - len(posting) + 0.5) / (len(posting) + 0.5))
             for i, freq in posting:
                 norm = freq + self.k1 * (1 - self.b + self.b * self.lengths[i] / self.avg_len)
                 scores[i] += idf * (freq * (self.k1 + 1)) / norm
         return scores
+
+    def _query_postings(self, query: str) -> list[tuple[str, list[tuple[int, int]]]]:
+        """Query terms worth traversing, commonest ones dropped once anything selective remains.
+
+        A term in nearly every passage has an IDF of about zero, so it changes no ranking — but it
+        still makes every passage a candidate, and each candidate then costs a cosine and a Hit.
+        That, not the vector scan, is what made a 20,000-passage corpus take a quarter of a second
+        per query. Dropped only when a selective term survives, so a query built entirely of common
+        words still retrieves something.
+        """
+        found = [(t, p) for t in set(terms(query)) if (p := self.postings.get(t))]
+        if self.n < COMMON_TERM_FLOOR:
+            return found
+        selective = [(t, p) for t, p in found if len(p) / self.n < MAX_DOC_FRACTION]
+        return selective or found
 
     def search(self, query: str, k: int = 5, alpha: float = 0.5, runtime: Runtime | None = None, min_score: float = 0.12) -> list[Hit]:
         """min_score matters once embeddings are on: cosine makes every passage a candidate, so
@@ -97,7 +123,8 @@ class Index:
         dense: dict[int, float] = {}
         if self.vectors:
             qv = normalize((runtime.embed([query]) if runtime else [hashed_embedding(query)])[0])
-            dense = {i: cosine(qv, v) for i, v in enumerate(self.vectors)}
+            scan = self._dense_candidates(qv, lexical)
+            dense = {i: cosine(qv, self.vectors[i]) for i in scan}
 
         candidates = set(lexical) | set(dense)
         hits = []
@@ -107,6 +134,14 @@ class Index:
             hits.append(Hit(self.passages[i], alpha * lex + (1 - alpha) * den, lex, den))
         hits.sort(key=lambda h: -h.score)
         return [h for h in hits[:k] if h.score >= min_score]
+
+    def _dense_candidates(self, qv: Vector, lexical: dict[int, float]) -> set[int]:
+        """Which passages are worth a cosine. Bucket neighbours are approximate, so every passage
+        BM25 already matched is scored too: a passage that shares the query's words must not be lost
+        to a projection that happened to send it elsewhere."""
+        if self.dense_index is None:
+            return set(range(len(self.vectors)))
+        return self.dense_index.candidates(qv) | set(lexical)
 
     @staticmethod
     def load(path: str | Path) -> "Index":
