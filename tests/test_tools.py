@@ -290,3 +290,38 @@ def test_the_solver_still_decides_correctly():
     assert z3_solve("(declare-const x Real)(assert (> x 3.0))")[0] == "sat"
     assert z3_solve("(declare-const x Real)(assert (> x 3.0))(assert (< x 1.0))")[0] == "unsat"
     assert z3_solve("this is not smt-lib at all")[0] == "error"
+
+
+def test_a_runaway_query_is_cancelled_rather_than_hanging_the_run():
+    """A recursive CTE is a legal SELECT that never returns. The trace replay runs inside worker
+    threads, so without a deadline a few of these stall the entire run indefinitely."""
+    import time
+
+    grids = [[["Model", "Acc"], ["a", "1"], ["b", "2"]]]
+    query = ("WITH RECURSIVE forever(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM forever) "
+             "SELECT count(*) FROM forever")
+
+    start = time.monotonic()
+    result = run_sql(query, grids, timeout=2.0)
+    elapsed = time.monotonic() - start
+
+    assert not result.ok
+    assert "cancelled" in str(result)
+    assert elapsed < 10.0, f"query ran for {elapsed:.1f}s despite a 2s deadline"
+
+
+def test_the_query_deadline_reaches_the_tool_dispatcher():
+    """execute() passed its timeout to the python tool and dropped it for sql."""
+    import time
+
+    grids = [[["Model", "Acc"], ["a", "1"]]]
+    query = ("WITH RECURSIVE forever(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM forever) "
+             "SELECT count(*) FROM forever")
+    start = time.monotonic()
+    result = execute("sql", query, "", grids, timeout=2.0)
+    assert not result.ok and time.monotonic() - start < 10.0
+
+
+def test_an_ordinary_query_is_unaffected_by_the_deadline():
+    grids = [[["Model", "Acc"], ["a", "1"], ["b", "2"]]]
+    assert run_sql("SELECT Model FROM t ORDER BY Acc DESC", grids).ok

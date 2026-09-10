@@ -121,7 +121,10 @@ the observation it wishes it had got. So every action gets replayed: `python` ru
 rows become sanitised columns (`Latency (ms)` → `latency_ms`), cells get typed so
 `max(accuracy) - min(accuracy)` actually works, captions become readable aliases (`table_1`), and
 joins across two tables in different sections are allowed. The schema is written into the prompt,
-so the model queries columns that exist. Read-only `SELECT`/`WITH` only. `lookup` searches the source. Claimed observations are compared to the
+so the model queries columns that exist. Read-only `SELECT`/`WITH` only, against an in-memory
+database holding nothing but the document's own tables, and under a wall-clock deadline — a
+recursive CTE is a perfectly legal `SELECT` that never returns, and the replay runs in worker
+threads, so a few of those would otherwise stall the run for good. `lookup` searches the source. Claimed observations are compared to the
 real ones with numeric tolerance. Mismatches get **repaired** — the real output replaces the invented
 one and the original is kept in provenance — and steps whose tool genuinely errored are left alone
 so the gate still rejects them.

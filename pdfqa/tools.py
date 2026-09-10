@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 
 NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
@@ -99,7 +100,8 @@ def describe_schema(grids: list[list[list[str]]], captions: list[str] | None = N
     return "\n".join(f"{name}({', '.join(cols)})" for name, cols in schema.items()) or "(no tables in scope)"
 
 
-def run_sql(query: str, grids: list[list[list[str]]], limit: int = 50, captions: list[str] | None = None) -> ToolResult:
+def run_sql(query: str, grids: list[list[list[str]]], limit: int = 50, captions: list[str] | None = None,
+            timeout: float = 10.0) -> ToolResult:
     if SQL_FORBIDDEN.search(query) or not SELECT_ONLY.match(query):
         return ToolResult(False, "only read-only SELECT queries are allowed", "sql")
     if not grids:
@@ -108,11 +110,18 @@ def run_sql(query: str, grids: list[list[list[str]]], limit: int = 50, captions:
         conn, _ = load_tables(grids, captions)
     except sqlite3.Error as exc:
         return ToolResult(False, f"table load failed: {exc}", "sql")
+    # `WITH RECURSIVE forever(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM forever)` is a legal SELECT
+    # that never returns. Without this the worker thread replaying the trace hangs for good, and
+    # enough of them stall the whole run.
+    deadline = time.monotonic() + timeout
+    conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
     try:
         rows = conn.execute(query).fetchmany(limit)
     except sqlite3.Error as exc:
-        return ToolResult(False, f"sql error: {exc}", "sql")
+        expired = time.monotonic() > deadline
+        return ToolResult(False, f"query exceeded {timeout:g}s and was cancelled" if expired else f"sql error: {exc}", "sql")
     finally:
+        conn.set_progress_handler(None, 0)
         conn.close()
     if not rows:
         return ToolResult(True, "(no rows)", "sql")
@@ -149,7 +158,7 @@ def execute(
         ok, out = run_python(action_input, timeout)
         return ToolResult(ok, out, "python")
     if action == "sql":
-        return run_sql(action_input, grids or [], captions=captions)
+        return run_sql(action_input, grids or [], captions=captions, timeout=timeout)
     if action == "lookup":
         return run_lookup(action_input, context)
     return ToolResult(False, f"unknown tool: {action}", action)
