@@ -44,11 +44,45 @@ def test_lexical_grounding_rejects_off_topic_answer():
     assert not lexical_grounding(rec("How many experts?", "Quarterly revenue grew across the European segment.")).passed
 
 
-def test_sandbox_blocks_side_effects():
+def test_sandbox_runs_honest_solver_code():
     ok, out = run_python("print('PASS')")
     assert ok and "PASS" in out
-    blocked, msg = run_python("import os\nos.system('echo hi')")
-    assert not blocked and "blocked" in msg
+    ok, out = run_python("from fractions import Fraction\nimport math\n"
+                         "print('PASS' if math.isclose(float(Fraction(1, 2)), 0.5) else 'FAIL')")
+    assert ok and "PASS" in out, out
+
+
+def test_sandbox_refuses_the_modules_that_touch_the_machine():
+    for code in ("import os\nos.system('echo hi')",
+                 "import subprocess\nsubprocess.run(['id'])",
+                 "import socket\nsocket.socket()"):
+        ok, msg = run_python(code)
+        assert not ok, f"{code!r} was allowed: {msg}"
+
+
+def test_sandbox_denies_the_builtins_that_defeat_a_source_blocklist():
+    """A blocklist over the source text used to guard this, and `b['ev'+'al']` walked straight past
+    it to arbitrary shell commands. The names are gone from the child now, not merely unspellable."""
+    ok, out = run_python(
+        "b = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)\n"
+        "print(sorted(n for n in ('eval', 'exec', 'compile', 'open', '__import__') if n in b))\n"
+    )
+    assert ok, out
+    assert "'eval'" not in out and "'exec'" not in out and "'open'" not in out and "'compile'" not in out
+
+
+def test_an_allowed_module_does_not_hand_back_real_builtins():
+    """`random.__builtins__['open']` was a working escape: an imported module carries the real
+    builtins mapping, not the restricted one the payload was given."""
+    ok, out = run_python("import random\nprint('open' in random.__builtins__)")
+    assert ok, out
+    assert "False" in out
+
+
+def test_sandbox_survives_a_memory_bomb():
+    ok, out = run_python("x = 'a'\nfor _ in range(40):\n    x = x + x\nprint(len(x))", timeout=15.0)
+    assert not ok
+    assert "MemoryError" in out or "timeout" in out
 
 
 def test_verify_records_gate_log(runtime):

@@ -52,6 +52,14 @@ class VerifyConfig:
     symbolic: bool = True
     z3: bool = True
     allow_exec: bool = True
+    """Run model-written Python and SQL to reproduce trace observations.
+
+    On, because it is the only thing that makes a ReAct trace evidence rather than a claim: with it
+    off, every trace-derived number is unsupported and the whole shape is rejected. The interpreter
+    it runs in is hardened but is not an isolation boundary, and the code it runs is written by a
+    model from document text — so for corpora you did not choose yourself, turn it off with
+    `--no-exec` or run the pipeline in a container.
+    """
     consistency_samples: int = 0
     min_quality: float = 0.55
 

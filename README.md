@@ -126,6 +126,46 @@ real ones with numeric tolerance. Mismatches get **repaired** — the real outpu
 one and the original is kept in provenance — and steps whose tool genuinely errored are left alone
 so the gate still rejects them.
 
+### What running that code does and does not guarantee
+
+Replaying a trace means executing code a model wrote from document text, so a document is an input
+to it. Be clear-eyed about the boundary.
+
+The child interpreter is started isolated (`-I -S`), and its builtins have `eval`, `exec`, `compile`,
+`open`, `globals`, `locals`, `vars` and `input` removed outright — not hidden, removed — with
+`__import__` replaced by one that serves only pure-computation modules (`math`, `fractions`,
+`statistics`, `decimal`, `itertools`, `cmath`, `numbers`, `random`, `re`). Those modules get the
+restricted mapping attached to them as well, because an imported module otherwise carries the real
+builtins on `__builtins__` and `random.__builtins__["open"]` is a one-line way out. The kernel caps
+address space at 512 MB, CPU time at the timeout, core dumps at zero and file size at zero, so the
+child cannot write a byte anywhere.
+
+What this replaced was a regular expression over the source text, and that failed in both
+directions: `b["ev" + "al"]` reached `eval` and then arbitrary shell commands without ever spelling a
+banned word, while `from fractions import Fraction` was rejected as an illegal import, so honest
+solver code failed for the same reason dishonest code succeeded.
+
+**It is hardening, not isolation, and the difference matters.** Python's object graph is reachable
+from any value: walking `().__class__.__base__.__subclasses__()` still leads to a module holding the
+real builtins. Measured from there, on this machine, after that pivot: file writes are blocked by the
+size limit, but `subprocess` still runs commands, arbitrary files are still readable, and outbound
+sockets still connect. No in-process Python restriction closes that, and claiming otherwise would be
+worse than saying it plainly.
+
+So execution stays **on by default** — with it off, every trace-derived number is unsupported and the
+entire `react` shape is rejected, which is a real cost, not a hypothetical one — and the run report
+records `executes_model_code` so it is never a surprise. For documents you did not choose yourself,
+turn it off:
+
+```bash
+pdfqa run scraped/ -o dataset/ --no-exec
+```
+
+With execution off the trace and symbolic gates report **inconclusive** rather than passing. They
+used to return a pass, which put traces whose observations were never reproduced into the dataset
+wearing the same badge as traces that were. If you need both the shape and the safety, run the
+pipeline in a container.
+
 **Everything gets gated.** Rows pass through cheap deterministic checks first, then model checks:
 
 - *Forward NLI* — is the answer entailed by the source

@@ -371,6 +371,7 @@ class Pipeline:
         self.report["cache"] = self.store.stats()
         self.report["llm_calls"] = len(self.runtime.calls)
         self.report["runtime"] = self.runtime.health()
+        self.report["executes_model_code"] = bool(self.cfg.verify.enabled and self.cfg.verify.allow_exec)
         self.report["files"]["run_report"] = str(_write_run_report(self.report, out))
         self.progress("done", {"records": len(kept), "outdir": self.cfg.outdir})
         self._assert_backend_answered()

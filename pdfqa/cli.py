@@ -54,6 +54,8 @@ def _config(args) -> Config:
     if getattr(args, "no_figures", False):
         cfg.assets_dir = None
         cfg.synth.figure_qa_per_doc = 0
+    if getattr(args, "no_exec", False):
+        cfg.verify.allow_exec = False
     if getattr(args, "offline", False):
         cfg.verify.model_gates = False
         cfg.graph.llm_extract = False
@@ -336,6 +338,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-corpus", action="store_true", help="skip the retrieval corpus export")
     run.add_argument("--against", nargs="+", help="drop questions that near-duplicate these earlier exports")
     run.add_argument("--no-cache", action="store_true")
+    run.add_argument("--no-exec", action="store_true",
+                     help="never run model-written code; trace and symbolic gates report inconclusive instead")
     run.add_argument("--budget-tokens", type=int,
                      help="stop generating once this many model tokens are spent, and export what is done")
     run.set_defaults(func=cmd_run)

@@ -236,7 +236,9 @@ def trace_execution(rec: QARecord, timeout: float = 10.0, allow_exec: bool = Tru
     if not rec.tool_trace:
         return Gate("trace_execution", True, 1.0, "no trace")
     if not allow_exec:
-        return Gate("trace_execution", True, 0.5, "execution disabled")
+        # Not a pass: nothing was checked. Recording it as one puts traces whose observations were
+        # never reproduced into the dataset wearing the same badge as traces that were.
+        return Gate("trace_execution", True, 0.0, "execution disabled; observations not reproduced", inconclusive=True)
 
     grids = rec.tool_env.get("grids") or []
     captions = rec.tool_env.get("captions") or []
@@ -309,34 +311,113 @@ def symbolic_check(runtime: Runtime, rec: QARecord, timeout: float = 10.0, allow
     if not data.get("applicable", False) or not data.get("code"):
         return Gate("symbolic", True, 1.0, "solver deemed claim non-quantitative")
     if not allow_exec:
-        return Gate("symbolic", True, 0.5, "execution disabled")
+        return Gate("symbolic", True, 0.0, "execution disabled; claim not checked", inconclusive=True)
     ok, output = run_python(str(data["code"]), timeout)
     passed = ok and "PASS" in output and "FAIL" not in output
     return Gate("symbolic", passed, 1.0 if passed else 0.0, output[:400])
 
 
-BANNED = re.compile(r"\b(import\s+(?!math\b|itertools\b|fractions\b|statistics\b|decimal\b)|__import__|open\s*\(|exec\s*\(|eval\s*\(|subprocess|socket|shutil|os\.)")
+SOLVER_MODULES = ("math", "itertools", "fractions", "statistics", "decimal", "cmath", "numbers", "random", "re")
+
+BLOCKED_BUILTINS = (
+    "eval exec compile open input breakpoint help __import__ __loader__ __spec__ memoryview "
+    "globals locals vars"
+).split()
+"""Removed from the child's builtins outright, so no amount of string-building reaches them."""
+
+MEMORY_LIMIT = 512 * 1024 * 1024
+OUTPUT_LIMIT = 20000
+
+SANDBOX_RUNNER = '''
+import resource, sys, builtins
+
+resource.setrlimit(resource.RLIMIT_AS, ({mem}, {mem}))
+resource.setrlimit(resource.RLIMIT_CPU, ({cpu}, {cpu}))
+resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+try:
+    resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+except (ValueError, OSError):
+    pass
+
+_real_import = builtins.__import__
+_ALLOWED = set({modules!r})
+_BLOCKED = set({blocked!r})
+
+# Everything except the dangerous names, rather than a short allowlist: module internals look their
+# builtins up through this same mapping, so a mapping missing KeyError or getattr breaks re and
+# random rather than the attacker.
+_safe = {{k: getattr(builtins, k) for k in dir(builtins) if k not in _BLOCKED}}
+
+_MODULES = {{}}
+for _name in _ALLOWED:
+    try:
+        _m = _real_import(_name)
+    except ImportError:
+        continue
+    # An imported module carries the *real* builtins on __builtins__, so `random.__builtins__["open"]`
+    # handed back everything this sandbox removes. Point it at the restricted mapping instead.
+    _m.__builtins__ = _safe
+    _MODULES[_name] = _m
+
+
+def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    root = name.split(".")[0]
+    if root not in _MODULES:
+        raise ImportError("module %r is not available to solver code" % name)
+    return _MODULES[root]
+
+
+_safe["__import__"] = _guarded_import
+
+with open({payload!r}, "r", encoding="utf-8") as fh:
+    _source = fh.read()
+
+_code = compile(_source, "<solver>", "exec")
+del builtins, resource, _real_import
+exec(_code, {{"__builtins__": _safe, "__name__": "__main__"}})
+'''
 
 
 def run_python(code: str, timeout: float = 10.0) -> tuple[bool, str]:
-    """Execute solver code in a separate interpreter with imports restricted to pure-math modules."""
-    banned = BANNED.search(code)
-    if banned:
-        return False, f"blocked construct: {banned.group(0).strip()}"
+    """Run solver code in a separate interpreter stripped of the means to affect this machine.
+
+    Solver code is written by a model from document text, so a document is an input to it. The
+    interpreter it runs in has no eval, exec, compile, open or getattr, an __import__ that serves
+    only pure-computation modules, and kernel limits on address space, CPU time, subprocesses and
+    file size — file size zero, so it cannot write at all.
+
+    There is deliberately no blocklist over the source text. One used to guard this, and it did not
+    work in either direction: `b['ev'+'al']` reached eval without ever spelling it, while
+    `from fractions import Fraction` was rejected as an illegal import, so honest solver code failed
+    for the same reason dishonest code got through.
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        script = Path(tmp) / "check.py"
-        script.write_text(code, encoding="utf-8")
+        payload = Path(tmp) / "solver.py"
+        payload.write_text(code, encoding="utf-8")
+        runner = Path(tmp) / "runner.py"
+        runner.write_text(
+            SANDBOX_RUNNER.format(
+                mem=MEMORY_LIMIT,
+                cpu=max(1, int(timeout) + 1),
+                modules=list(SOLVER_MODULES),
+                blocked=BLOCKED_BUILTINS,
+                payload=str(payload),
+            ),
+            encoding="utf-8",
+        )
         try:
             proc = subprocess.run(
-                [sys.executable, "-I", "-S", str(script)],
+                [sys.executable, "-I", "-S", str(runner)],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 cwd=tmp,
+                stdin=subprocess.DEVNULL,
             )
         except subprocess.TimeoutExpired:
             return False, "timeout"
-        out = (proc.stdout + proc.stderr).strip()
+        out = (proc.stdout + proc.stderr).strip()[:OUTPUT_LIMIT]
         return proc.returncode == 0, out
 
 
