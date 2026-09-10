@@ -139,3 +139,34 @@ def test_second_run_hits_the_cache(config):
     second = Pipeline(config)
     second.run()
     assert second.store.hits > 0
+
+
+def test_numbers_with_thousands_separators_are_read_as_one_number():
+    from pdfqa.verify import numbers_in
+
+    assert numbers_in("1,000 and 12,500.5 and -3 and 0.75") == [1000.0, 12500.5, -3.0, 0.75]
+    assert numbers_in("no digits here") == []
+
+
+def test_a_correct_answer_is_not_rejected_for_dropping_a_comma():
+    """Papers write 1,000 and answers write 1000. Matching bare digit runs split that into 1 and
+    000, so the correct figure looked unsupported — in the gate that rejects the most records."""
+    r = rec("How many steps was it trained for?", "It was trained for 1000 steps.")
+    r.context = "The model was trained for 1,000 steps on the corpus."
+    assert numeric_grounding(r).passed, numeric_grounding(r).detail
+
+
+def test_a_hallucinated_figure_is_not_accepted_via_split_fragments():
+    """1,500 became [1, 500] and a source saying '1,000 ... 500' contained both, so a wrong number
+    passed the gate whose entire job is to catch wrong numbers."""
+    r = rec("How many parameters?", "The model has 1,500 million parameters.")
+    r.context = "The model has 1,000 million parameters and 500 layers."
+    assert not numeric_grounding(r).passed
+
+
+def test_grading_matches_numbers_across_separator_styles():
+    from pdfqa.evaluate import numeric_match
+
+    assert numeric_match("1,000", "1000") == 1.0
+    assert numeric_match("12,500 tokens", "12500 tokens") == 1.0
+    assert numeric_match("1,000", "2000") == 0.0

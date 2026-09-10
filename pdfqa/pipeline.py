@@ -49,7 +49,7 @@ def _noop(stage: str, info: dict) -> None:
 
 class Pipeline:
     def __init__(self, config: Config, progress: Progress | None = None):
-        self.cfg = config
+        self.cfg = config.validate()
         self.store = Store(config.cache_dir, config.cache)
         self.runtime = Runtime(config.runtime_specs(), retries=config.runtime.retries, budget_tokens=config.runtime.budget_tokens)
         self.rng = random.Random(config.seed)

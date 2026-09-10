@@ -443,6 +443,12 @@ Three modes, and the gap between them is the interesting number:
 - `closed` — nothing is provided. Whatever it scores here, it already knew; that portion of your
   dataset is teaching it nothing.
 
+Numbers are read with thousands separators intact. Matching bare digit runs splits `1,000` into
+`1` and `000`, which broke grounding in both directions at once: a correct answer writing `1000`
+where the paper wrote `1,000` was rejected as unsupported, and a hallucinated `1,500` was accepted
+against a source saying `1,000 ... 500` because both sides reduced to fragments the other happened
+to contain. That was the gate which rejects the most records, failing at the thing it exists for.
+
 Grading is a model judge plus two mechanical checks, and the mechanical ones can overrule: an answer
 the judge calls correct is downgraded to partial if a number from the reference is missing, since
 judges are lenient about digits and a wrong figure is not a wording difference.

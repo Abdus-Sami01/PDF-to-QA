@@ -11,7 +11,20 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
-NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+NUMBER = re.compile(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?")
+"""Thousands separators included, because a paper writes 1,000 and an answer writes 1000.
+
+Matching bare digit runs split "1,000" into 1 and 000, which broke grounding in both directions: a
+correct answer saying 1000 was rejected as unsupported, and a hallucinated 1,500 was accepted
+against a source saying 1,000 because both reduced to fragments the other happened to contain.
+"""
+
+
+def numbers_in(text: str) -> list[float]:
+    """Every number in the text, thousands separators removed before conversion."""
+    return [float(m.replace(",", "")) for m in NUMBER.findall(text)]
+
+
 IDENT = re.compile(r"[^a-z0-9_]+")
 SELECT_ONLY = re.compile(r"^\s*(select|with)\b", re.I)
 SQL_FORBIDDEN = re.compile(r"\b(attach|pragma|insert|update|delete|drop|alter|create|vacuum|load_extension)\b", re.I)
@@ -169,8 +182,8 @@ def observations_agree(claimed: str, actual: str, tolerance: float = 0.01) -> bo
     claimed, actual = (claimed or "").strip(), (actual or "").strip()
     if not claimed:
         return False
-    c_nums = [float(x) for x in NUMBER.findall(claimed)]
-    a_nums = [float(x) for x in NUMBER.findall(actual)]
+    c_nums = numbers_in(claimed)
+    a_nums = numbers_in(actual)
     if c_nums and a_nums:
         return all(any(abs(c - a) <= max(tolerance, abs(a) * tolerance) for a in a_nums) for c in c_nums)
     low_c, low_a = claimed.lower(), actual.lower()

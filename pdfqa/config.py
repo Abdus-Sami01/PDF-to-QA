@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -133,19 +134,65 @@ class Config:
 
     @staticmethod
     def from_dict(data: dict) -> "Config":
-        return _build(Config, data)
+        cfg = _build(Config, data)
+        cfg.validate()
+        return cfg
+
+    def validate(self) -> "Config":
+        """Reject settings that cannot mean anything, rather than running for an hour under them."""
+        problems: list[str] = []
+        if self.runtime.workers < 1:
+            problems.append(f"runtime.workers must be at least 1, got {self.runtime.workers}")
+        if self.figure_dpi <= 0:
+            problems.append(f"figure_dpi must be positive, got {self.figure_dpi}")
+        if self.chunk.max_tokens <= self.chunk.min_tokens:
+            problems.append(f"chunk.max_tokens ({self.chunk.max_tokens}) must exceed chunk.min_tokens ({self.chunk.min_tokens})")
+        if self.runtime.retries < 0:
+            problems.append(f"runtime.retries cannot be negative, got {self.runtime.retries}")
+        for name, value in (("verify.min_quality", self.verify.min_quality),
+                            ("synth.persona_ratio", self.synth.persona_ratio),
+                            ("synth.evol_ratio", self.synth.evol_ratio),
+                            ("synth.dpo_ratio", self.synth.dpo_ratio),
+                            ("select.lexical_threshold", self.select.lexical_threshold),
+                            ("select.semantic_threshold", self.select.semantic_threshold),
+                            ("chunk.dedup_threshold", self.chunk.dedup_threshold)):
+            if not 0.0 <= float(value) <= 1.0:
+                problems.append(f"{name} must be between 0 and 1, got {value}")
+        if self.split:
+            if len(self.split) != 3:
+                problems.append(f"split needs exactly three ratios, got {len(self.split)}")
+            elif abs(sum(self.split) - 1.0) > 0.01:
+                problems.append(f"split ratios must sum to 1, got {sum(self.split):g}")
+        if self.select.mix and abs(sum(self.select.mix.values()) - 1.0) > 0.01:
+            problems.append(f"select.mix must sum to 1, got {sum(self.select.mix.values()):g}")
+        if not self.synth.styles:
+            problems.append("synth.styles cannot be empty")
+        if not self.synth.personas:
+            problems.append("synth.personas cannot be empty")
+        if problems:
+            raise ValueError("invalid configuration:\n  - " + "\n  - ".join(problems))
+        return self
 
 
-def _build(cls, data: dict):
+def _build(cls, data: dict, path: str = ""):
+    known = {f.name for f in fields(cls)}
+    for key in data:
+        if key not in known:
+            # A silently dropped key is the worst kind of config bug: you set qa_per_chunk, mistype
+            # it, get the default, and nothing ever tells you the setting had no effect.
+            near = difflib.get_close_matches(key, sorted(known), n=1)
+            where = f"{path}{key}"
+            hint = f"; did you mean '{path}{near[0]}'?" if near else f"; valid keys: {sorted(known)}"
+            raise ValueError(f"unknown configuration key {where!r}{hint}")
     kwargs = {}
     for f in fields(cls):
         if f.name not in data:
             continue
         value = data[f.name]
         if is_dataclass(f.type) and isinstance(value, dict):
-            kwargs[f.name] = _build(f.type, value)
+            kwargs[f.name] = _build(f.type, value, f"{path}{f.name}.")
         elif isinstance(value, dict) and f.name in _NESTED:
-            kwargs[f.name] = _build(_NESTED[f.name], value)
+            kwargs[f.name] = _build(_NESTED[f.name], value, f"{path}{f.name}.")
         else:
             kwargs[f.name] = value
     return cls(**kwargs)

@@ -20,7 +20,20 @@ from .tools import execute, observations_agree
 from .records import QARecord
 
 WORD = re.compile(r"[A-Za-z0-9_.%-]+")
-NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+NUMBER = re.compile(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?")
+"""Thousands separators included, because a paper writes 1,000 and an answer writes 1000.
+
+Matching bare digit runs split "1,000" into 1 and 000, which broke grounding in both directions: a
+correct answer saying 1000 was rejected as unsupported, and a hallucinated 1,500 was accepted
+against a source saying 1,000 because both reduced to fragments the other happened to contain.
+"""
+
+
+def numbers_in(text: str) -> list[float]:
+    """Every number in the text, thousands separators removed before conversion."""
+    return [float(m.replace(",", "")) for m in NUMBER.findall(text)]
+
+
 CONTEXT_DEIXIS = re.compile(
     r"\b(this|the)\s+(passage|section|paper|document|text|excerpt|table above|figure above)\b|\bthe above\b|\bas (?:stated|mentioned|shown) (?:above|here)\b",
     re.I,
@@ -93,16 +106,16 @@ def supported_numbers(rec: QARecord) -> list[float]:
     """Numbers the record may legitimately state: those in the source, plus any a tool actually
     computed. A ReAct trace exists to derive figures the text does not contain, and an executed
     observation is stronger evidence than finding the digits in the prose."""
-    values = [float(x) for x in NUMBER.findall(rec.context)]
+    values = numbers_in(rec.context)
     for step in rec.tool_trace:
         if step.get("executed_ok"):
-            values += [float(x) for x in NUMBER.findall(str(step.get("executed_observation", "")))]
+            values += numbers_in(str(step.get("executed_observation", "")))
     return values
 
 
 def numeric_grounding(rec: QARecord) -> Gate:
     """Every number in the answer must be in the source or computed by a verified tool call."""
-    ans_nums = [float(x) for x in NUMBER.findall(generated_text(rec))]
+    ans_nums = numbers_in(generated_text(rec))
     ctx_nums = supported_numbers(rec)
     if not ans_nums:
         return Gate("numeric_grounding", True, 1.0, "no numbers")

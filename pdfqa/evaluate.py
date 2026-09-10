@@ -14,7 +14,7 @@ from .llm import Runtime, parse_json
 from .prompts import GRADE_ANSWER
 from .records import QARecord
 from .retrieve import Index, answer as retrieve_answer
-from .verify import NUMBER, tokens
+from .verify import numbers_in, tokens
 
 VERDICTS = ("correct", "partial", "incorrect")
 
@@ -61,10 +61,10 @@ def token_f1(reference: str, candidate: str) -> float:
 
 def numeric_match(reference: str, candidate: str, tolerance: float = 0.005) -> float:
     """Quantitative answers live or die on their numbers, so score those separately from wording."""
-    ref = [float(x) for x in NUMBER.findall(reference)]
+    ref = numbers_in(reference)
     if not ref:
         return 1.0
-    cand = [float(x) for x in NUMBER.findall(candidate)]
+    cand = numbers_in(candidate)
     matched = sum(1 for r in ref if any(abs(r - c) <= max(0.01, abs(r) * tolerance) for c in cand))
     return matched / len(ref)
 

@@ -268,3 +268,57 @@ def test_rates_from_an_empty_report_fall_back_to_the_upper_bound():
 
     assert rates_from_report({}) == DEFAULT_RATES
     assert rates_from_report({"gates": {}}) == DEFAULT_RATES
+
+
+# ------------------------------------------------------------------ configuration validation
+
+
+def test_a_mistyped_key_is_refused_with_the_name_it_meant():
+    """The worst kind of config bug: set qa_per_chunk, mistype it, get the default, never find out."""
+    from pdfqa.config import Config
+
+    with pytest.raises(ValueError) as exc:
+        Config.from_dict({"synth": {"qa_per_chunks": 9}})
+    assert "synth.qa_per_chunks" in str(exc.value)
+    assert "synth.qa_per_chunk" in str(exc.value)
+
+    with pytest.raises(ValueError) as exc:
+        Config.from_dict({"outdirr": "/tmp/x"})
+    assert "outdir" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        ({"split": [0.9, 0.9, 0.9]}, "sum to 1"),
+        ({"split": [0.5, 0.5]}, "three ratios"),
+        ({"runtime": {"workers": 0}}, "at least 1"),
+        ({"runtime": {"retries": -1}}, "negative"),
+        ({"figure_dpi": -10}, "positive"),
+        ({"verify": {"min_quality": 3.0}}, "between 0 and 1"),
+        ({"select": {"mix": {"simple": 5.0}}}, "sum to 1"),
+        ({"chunk": {"max_tokens": 50, "min_tokens": 60}}, "must exceed"),
+        ({"synth": {"styles": []}}, "cannot be empty"),
+    ],
+)
+def test_settings_that_cannot_mean_anything_are_refused(data, expected):
+    from pdfqa.config import Config
+
+    with pytest.raises(ValueError) as exc:
+        Config.from_dict(data)
+    assert expected in str(exc.value)
+
+
+def test_a_valid_configuration_still_loads():
+    from pdfqa.config import Config
+
+    cfg = Config.from_dict({"synth": {"qa_per_chunk": 5}, "split": [0.7, 0.15, 0.15],
+                            "runtime": {"workers": 2}})
+    assert cfg.synth.qa_per_chunk == 5 and cfg.runtime.workers == 2
+
+
+def test_the_pipeline_checks_a_config_that_was_edited_after_loading(config):
+    """Validation at load time misses `cfg.runtime.workers = 0` written in a caller's own script."""
+    config.runtime.workers = 0
+    with pytest.raises(ValueError):
+        Pipeline(config)
